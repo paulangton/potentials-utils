@@ -253,7 +253,7 @@ func main() {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		log.Println("Got request for:", r.URL.String())
 	})
-
-	go log.Fatal(http.ListenAndServe(":8080", nil))
+	log.Printf("Server UP")
+	log.Fatal(http.ListenAndServe(":8080", nil))
 
 }
