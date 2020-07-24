@@ -34,33 +34,33 @@ Potentials playlist.
 
 ### Deploying your own potentials-utils
 1. Clone this repository
-```
-git clone git@github.com:paulangton/potentials-utils.git && cd potentials-utils
-```
+    ```
+    git clone git@github.com:paulangton/potentials-utils.git && cd potentials-utils
+    ```
 1. Register a [Spotify app](https://developer.spotify.com/dashboard/applications).
 1. Install [docker](https://docs.docker.com/get-docker/). 
 1. Create your own `.env.` file in this project directory with the following variables:
-```
-SPOTIFY_ID=<Your Spotify Client ID>
-SPOTIFY_SECRET=<Your Spotify Secret>
-SPOTIFY_CALLBACK_URL=http://localhost:8080/callback/spotify
-SPOTIFY_USER=<Your Spotify Username>
-SPOTIFY_POTENTIALS_PLAYLIST_ID=<Your Potentials Playlist ID>
-```
+    ```
+    SPOTIFY_ID=<Your Spotify Client ID>
+    SPOTIFY_SECRET=<Your Spotify Secret>
+    SPOTIFY_CALLBACK_URL=http://localhost:8080/callback/spotify
+    SPOTIFY_USER=<Your Spotify Username>
+    SPOTIFY_POTENTIALS_PLAYLIST_ID=<Your Potentials Playlist ID>
+    ```
 1. Build a docker image with your new `.env` file with
-```
-make image
-```
+    ```
+    make image
+    ```
 1. Run your container exposed on port `8080` with
-```
-docker run -it -p 8080:8080
-```
+    ```
+    docker run -it -p 8080:8080
+    ```
 and follow the instructions to authenticate with Spotify.
 
 ### Cleaning your Potentials
 1. Kick off a cleaning of your Potentials with 
-```
-curl localhost:8080/spotify/cleanpotentials
-```
+    ```
+    curl localhost:8080/spotify/cleanpotentials
+    ```
 
 
