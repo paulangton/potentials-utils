@@ -38,7 +38,7 @@ Potentials playlist.
 git clone git@github.com:paulangton/potentials-utils.git && cd potentials-utils
 ```
 1. Register a [Spotify app](https://developer.spotify.com/dashboard/applications).
-1. Install `[docker](https://docs.docker.com/get-docker/)`. 
+1. Install [docker](https://docs.docker.com/get-docker/). 
 1. Create your own `.env.` file in this project directory with the following variables:
 ```
 SPOTIFY_ID=<Your Spotify Client ID>
