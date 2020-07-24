@@ -103,7 +103,7 @@ func (c *SpotifyLibraryCache) readyCache() error {
 
 }
 
-// AuthMe authenticates with Spotify as me and creates a client  or uses the current client
+// AuthMe authenticates with Spotify as me and creates a client or uses the current client
 // if already authenticated.
 func AuthMe() error {
 	if spClient == nil {
@@ -119,7 +119,6 @@ func AuthMe() error {
 		}
 		// The current client works, just use it.
 		log.Printf("The current Spotify client is authenticated.")
-
 	}
 	return nil
 }
