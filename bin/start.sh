@@ -1,4 +1,3 @@
-#!/bin/sh
-export $(cat .env)
+#!/bin/bash
 
-go run main.go
+bin/potentials-utils --runserver

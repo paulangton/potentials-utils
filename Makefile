@@ -2,7 +2,7 @@ BINARY_PATH=bin/potentials-utils
 TAG=$(shell git rev-parse HEAD)
 
 build:
-	go build -o bin/$(BINARY_PATH)
+	go build -o $(BINARY_PATH)
 
 test:
 	go test
