@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/zmb3/spotify"
+    "potentials-utils/prefixtree"
 )
 
 var runserver bool
@@ -33,6 +34,7 @@ var (
 // be completely rebuilt if the current time is after the evictionTime.
 type SpotifyLibraryCache struct {
 	items    map[spotify.ID]*spotify.SavedTrack
+    prefixTree *prefixtree.PrefixTree
 	lifetime time.Duration
 	// This cache has to be completely rebuilt, no element-wise evictions
 	evictionTime time.Time
@@ -46,6 +48,7 @@ func NewSpotifyLibraryCache() (*SpotifyLibraryCache, error) {
 	}
 	c := &SpotifyLibraryCache{
 		items:        map[spotify.ID]*spotify.SavedTrack{},
+        prefixTree:   prefixtree.NewPrefixTree(),
 		lifetime:     24 * time.Hour,
 		evictionTime: time.Now(),
 	}
@@ -217,7 +220,7 @@ func HandleCleanPotentials(w http.ResponseWriter, r *http.Request) {
 func refreshLibraryCache() error {
 	if libraryCache != nil {
 		// Quick cache health check, will rebuild the cache if it has expired
-		libraryCache.Get(spotify.ID(0))
+		libraryCache.Get(spotify.ID(""))
 		return nil
 	}
 	c, err := NewSpotifyLibraryCache()
@@ -283,7 +286,7 @@ func cleanPotentialsPage(page []spotify.PlaylistTrack, playlistID spotify.ID, dr
 		trackID := playlistTrack.Track.ID
 		libraryTrack, err := libraryCache.Get(trackID)
 		if err != nil {
-			return spotify.ID(0), 0, err
+			return spotify.ID(""), 0, err
 		}
 		if libraryTrack != nil {
 			// track is already in our library, remove it
@@ -313,7 +316,7 @@ func cleanPotentialsPage(page []spotify.PlaylistTrack, playlistID spotify.ID, dr
 
 func main() {
 
-    flag.BoolVar( &runserver, "runserver", false, "runs cleanpotentials in server mode")
+    flag.BoolVar(&runserver, "runserver", false, "runs cleanpotentials in server mode")
     flag.BoolVar(&dryRun, "dry-run", false, "prints tracks that would be deleted from potentials instead of removing them if true")
     flag.Parse()
 
