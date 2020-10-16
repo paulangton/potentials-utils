@@ -336,6 +336,9 @@ func main() {
         authSrv := authServer()
         log.Fatal(authSrv.ListenAndServe())
     } else {
+        if dryRun {
+            log.Printf("Running cleanPotentials in dry-run mode. No tracks will be deleted from your playlist.")
+        }
         cleaned, err := cleanPotentials(dryRun)
         if err != nil {
             log.Fatalf(err.Error())
