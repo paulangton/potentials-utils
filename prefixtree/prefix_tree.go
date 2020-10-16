@@ -1,9 +1,8 @@
 package prefixtree
 
 import (
-    "sort"
     "strings"
-    "log"
+    "bytes"
 )
 
 
@@ -56,12 +55,14 @@ func NewPrefixTree() *PrefixTree {
 func (p *PrefixTree) Add(s string) {
     next := p.Root
     for _, c := range s {
-        log.Printf(string(c))
         n, ok := next.children[c]
         if !ok {
-            next.children[c] = newPrefixNode(c)
+            prefixNode := newPrefixNode(c)
+            next.children[c] = prefixNode
+            next = prefixNode
+        } else {
+            next = n
         }
-        next = n
     }
 }
 
@@ -70,33 +71,64 @@ func (p *PrefixTree) Add(s string) {
 // node in the tree whose prefixes form the given string, false otherwise
 func (p *PrefixTree) Contains(s string) bool {
     next := p.Root
-    contained := true
     for _, c := range s {
         n, ok := next.children[c]
-        contained = contained && ok
+        if !ok {
+            return false
+        }
         next = n
     }
-    return contained
+    return true
 }
 
-// String prints a BFS of the prefix tree
+// String prints a BFS of the prefix tree. The only ordering guaranteed is that a rune at level
+// n will be printed before a rune at level n+1
 func (p *PrefixTree) String() string {
     next := p.Root
     q := next.childNodes()
     str := strings.Builder{}
     for len(q) > 0 {
         childPrefixes := next.childPrefixes()
-        sort.Slice(childPrefixes, func(i,j int) bool {
-            return childPrefixes[i] < childPrefixes[j]
-        })
         for _, p := range childPrefixes {
             str.WriteRune(p)
             str.WriteRune(',')
         }
         // queue pop
-        next, q := q[len(q)-1], q[:len(q)-1]
+        next, q = q[len(q)-1], q[:len(q)-1]
         q = append(q, next.childNodes()...)
     }
     return str.String()
 }
 
+
+// Words prints a list of all words present in the prefix tree
+func (p *PrefixTree) Words() []string {
+    words := []string{}
+    for _, n := range p.Root.childNodes() {
+        words = append(words, p.wordsHelper(n, &bytes.Buffer{})...)
+    }
+    return words
+}
+
+func (p *PrefixTree) wordsHelper(n *prefixNode, word *bytes.Buffer) []string {
+    // no error is returned from bytes.Buffer.WriteRune
+    word.WriteRune(n.data)
+    if len(n.children) == 0 {
+        return []string{word.String()}
+    } else {
+        words := []string{}
+        for _, c := range n.childNodes() {
+            words = append(words, p.wordsHelper(c, bytes.NewBuffer(word.Bytes()))...)
+        }
+        return words
+    }
+}
+
+// the docs say not to do this
+func copyStringBuilder(b strings.Builder) strings.Builder {
+    var newBuilder strings.Builder
+    for _, c := range b.String() {
+        newBuilder.WriteRune(c)
+    }
+    return b
+}
