@@ -31,7 +31,8 @@ var (
 )
 
 // SpotifyLibraryCache represents an in-memory cache of the current users' spotify library. It must
-// be completely rebuilt if the current time is after the evictionTime.
+// be completely rebuilt if the current time is after the evictionTime. Yeah I
+// know this is basically a hand-tuned database, I did it for fun go read a book
 type SpotifyLibraryCache struct {
 	items    map[spotify.ID]*spotify.SavedTrack
     prefixTree *prefixtree.PrefixTree
@@ -78,8 +79,15 @@ func (c *SpotifyLibraryCache) Put(k spotify.ID, v spotify.SavedTrack) error {
 		return err
 	}
 	c.items[k] = &v
+    c.prefixTree.Add(v.Name)
 	return nil
 }
+
+.// GetBySongArtistAlbum gets all tracks with the same song name, artist name, and album title
+func (c *SpotifyLibraryCache) GetBySongArtistAlbum(song, artist, album string) (*spotify.SavedTrack, error) {
+
+}
+
 
 func (c *SpotifyLibraryCache) readyCache() error {
 	if time.Now().Before(c.evictionTime) {
@@ -265,7 +273,7 @@ func cleanPotentials(dryRun bool) (int, error) {
 
 }
 
-// 
+// TrackString prints a human-readable summary of a spotify track
 func TrackString(t spotify.FullTrack) string {
     artistString := ""
     for ix, a := range t.Artists {
@@ -293,6 +301,8 @@ func cleanPotentialsPage(page []spotify.PlaylistTrack, playlistID spotify.ID, dr
 			// log.Printf("Found a duplicate track in the potentials playlist: %s by %s off the album %s (ID: %s).", track.Track.Name, track.Track.Artists[0].Name, track.Track.Album.Name, trackID)
 			duplicateTracks = append(duplicateTracks, playlistTrack)
 		}
+        trackName := playlistTrack.Track.Name
+        if 
 	}
 
     if dryRun {
@@ -316,7 +326,7 @@ func cleanPotentialsPage(page []spotify.PlaylistTrack, playlistID spotify.ID, dr
 
 func main() {
 
-    flag.BoolVar(&runserver, "runserver", false, "runs cleanpotentials in server mode")
+    flag.BoolVar(&runserver, "runserver", false, "runs potentials-utils in server mode")
     flag.BoolVar(&dryRun, "dry-run", false, "prints tracks that would be deleted from potentials instead of removing them if true")
     flag.Parse()
 
