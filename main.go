@@ -140,12 +140,10 @@ func (c *SpotifyLibraryCache) GetBySongAlbumArtistNames(songName, albumName stri
 	}
     searchStr := trackIndexString(songName, albumName, artistNames)
     if c.searchTree.Contains(searchStr) {
-        log.Printf("Found %s in the search tree, checking the cache for this item", searchStr)
         // search entire cache for songs that match these fields
         var matches []*spotify.SavedTrack
         for _, v := range c.items {
             if v.Name == songName && v.Album.Name == albumName && containsAll(getArtistNames(v.SimpleTrack), artistNames) {
-                log.Printf("Found track %v which matches search string %s", v, searchStr)
                 matches = append(matches, v)
             }
         }
@@ -319,7 +317,6 @@ func cleanPotentials(dryRun bool) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-    log.Printf("Words in the library search tree: %v", libraryCache.dumpTree())
 
 	// Clean the playlist page by page cross-referencing the library cache
 	pager := &playlist.Tracks
@@ -388,7 +385,6 @@ func cleanPotentialsPage(page []spotify.PlaylistTrack, playlistID spotify.ID, dr
         // Means we found at least one library track which is a
         // name-album-artist duplicate
         if len(duplicateLibraryTracks) > 0 {
-            log.Printf("Found some non-ID duplicates! %v", duplicateLibraryTracks)
 			duplicateTracks = append(duplicateTracks, playlistTrack)
         }
 	}
