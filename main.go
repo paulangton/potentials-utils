@@ -6,6 +6,7 @@ package main
 import (
 	"fmt"
     "flag"
+    "sort"
 	"log"
 	"math/rand"
 	"net/http"
@@ -35,7 +36,7 @@ var (
 // know this is basically a hand-tuned database, I did it for fun go read a book
 type SpotifyLibraryCache struct {
 	items    map[spotify.ID]*spotify.SavedTrack
-    prefixTree *prefixtree.PrefixTree
+    searchTree *prefixtree.PrefixTree
 	lifetime time.Duration
 	// This cache has to be completely rebuilt, no element-wise evictions
 	evictionTime time.Time
@@ -49,7 +50,7 @@ func NewSpotifyLibraryCache() (*SpotifyLibraryCache, error) {
 	}
 	c := &SpotifyLibraryCache{
 		items:        map[spotify.ID]*spotify.SavedTrack{},
-        prefixTree:   prefixtree.NewPrefixTree(),
+        searchTree:   prefixtree.NewPrefixTree(),
 		lifetime:     24 * time.Hour,
 		evictionTime: time.Now(),
 	}
@@ -61,9 +62,34 @@ func NewSpotifyLibraryCache() (*SpotifyLibraryCache, error) {
 
 }
 
-// Get returns the corresponding SavedTRack for the provided key if it exists and the cache is
+func trackIndexString(trackName, albumName string, artistNames []string) string {
+    var indexStrBuilder strings.Builder
+    // Song namr
+    indexStrBuilder.WriteString("%s", v.Name)
+    // Album name
+    indexStrBuilder.WriteString(fmt.Sprintf("%s", v.Album.Name))
+    // Each artist name, in alphabetical order
+    sort.Strings(artistNames)
+    for _, a := range artistNames {
+        indexStrBuilder.WriteString(fmt.Sprintf("%s", a.Name))
+    }
+    return indexStrBuilder.String()
+}
+
+// addTrackToSearchTree adds tracks to the search tree using a custom track
+// string "[TrackName][AlbumName][ArtistNames...]"
+func (c *SpotifyLibraryCache) addTrackToSearchTree(v spotify.SavedTrack) () {
+    var artistNames []string
+    for _, a := range v.Artists {
+        artistNames = append(artistNames, a.Name)
+    }
+
+    c.searchTree.Add(trackIndexString(v.Name, v.Album.Namem, artisNames))
+}
+
+// GetByID returns the corresponding SavedTRack for the provided key if it exists and the cache is
 // fresh. Will rebuild the cache if stale.
-func (c *SpotifyLibraryCache) Get(k spotify.ID) (*spotify.SavedTrack, error) {
+func (c *SpotifyLibraryCache) GetByID(k spotify.ID) (*spotify.SavedTrack, error) {
 	err := c.readyCache()
 	if err != nil {
 		return nil, err
@@ -79,12 +105,22 @@ func (c *SpotifyLibraryCache) Put(k spotify.ID, v spotify.SavedTrack) error {
 		return err
 	}
 	c.items[k] = &v
-    c.prefixTree.Add(v.Name)
+    c.addTrackToSearchTree(v)
 	return nil
 }
 
-.// GetBySongArtistAlbum gets all tracks with the same song name, artist name, and album title
-func (c *SpotifyLibraryCache) GetBySongArtistAlbum(song, artist, album string) (*spotify.SavedTrack, error) {
+// GetBySongArtistAlbum gets all tracks with the same song name, artist name, and album title
+func (c *SpotifyLibraryCache) GetBySongArtistAlbum(songName, albumName string, artistNames []string) ([]*spotify.SavedTrack, error) {
+    searchStr = trackIndexString(songName, albumName, artistNames)
+    if c.Contains(searchStr) {
+        // search entire cache for songs that match these fields
+        var matches []*spotify.SavedTrack
+        for _, v := range c.items {
+            
+        }
+    } else {
+        return nil, nil
+    }
 
 }
 
@@ -277,7 +313,7 @@ func cleanPotentials(dryRun bool) (int, error) {
 func TrackString(t spotify.FullTrack) string {
     artistString := ""
     for ix, a := range t.Artists {
-        if ix == len(t.Artists) {
+        if ix == len(t.Artists) - 1 {
             artistString += fmt.Sprintf("%s", a.Name)
         } else {
             artistString += fmt.Sprintf("%s, ", a.Name)
@@ -292,6 +328,7 @@ func cleanPotentialsPage(page []spotify.PlaylistTrack, playlistID spotify.ID, dr
 	duplicateTracks := []spotify.PlaylistTrack{}
 	for _, playlistTrack := range page {
 		trackID := playlistTrack.Track.ID
+        // first try to get the track by ID
 		libraryTrack, err := libraryCache.Get(trackID)
 		if err != nil {
 			return spotify.ID(""), 0, err
@@ -300,9 +337,11 @@ func cleanPotentialsPage(page []spotify.PlaylistTrack, playlistID spotify.ID, dr
 			// track is already in our library, remove it
 			// log.Printf("Found a duplicate track in the potentials playlist: %s by %s off the album %s (ID: %s).", track.Track.Name, track.Track.Artists[0].Name, track.Track.Album.Name, trackID)
 			duplicateTracks = append(duplicateTracks, playlistTrack)
+            continue
 		}
-        trackName := playlistTrack.Track.Name
-        if 
+        // next try to match the track metadata to something in our library
+        //trackName := playlistTrack.Track.Name
+        if libraryCache.trackName
 	}
 
     if dryRun {
