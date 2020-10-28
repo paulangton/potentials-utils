@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
     "context"
+    "strings"
 	"time"
 
 	"github.com/zmb3/spotify"
@@ -42,6 +43,10 @@ type SpotifyLibraryCache struct {
 	evictionTime time.Time
 }
 
+func (c *SpotifyLibraryCache) dumpTree() []string {
+    return c.searchTree.Words()
+}
+
 // NewSpotifyLibraryCache creates a SpotifyLibraryCache with a lifetime of 1 day.
 func NewSpotifyLibraryCache() (*SpotifyLibraryCache, error) {
 	err := AuthMe()
@@ -65,26 +70,23 @@ func NewSpotifyLibraryCache() (*SpotifyLibraryCache, error) {
 func trackIndexString(trackName, albumName string, artistNames []string) string {
     var indexStrBuilder strings.Builder
     // Song namr
-    indexStrBuilder.WriteString("%s", v.Name)
+    indexStrBuilder.WriteString(fmt.Sprintf("%s", trackName))
     // Album name
-    indexStrBuilder.WriteString(fmt.Sprintf("%s", v.Album.Name))
+    indexStrBuilder.WriteString(fmt.Sprintf("%s", albumName))
     // Each artist name, in alphabetical order
     sort.Strings(artistNames)
     for _, a := range artistNames {
-        indexStrBuilder.WriteString(fmt.Sprintf("%s", a.Name))
+        indexStrBuilder.WriteString(fmt.Sprintf("%s", a))
     }
     return indexStrBuilder.String()
 }
 
 // addTrackToSearchTree adds tracks to the search tree using a custom track
 // string "[TrackName][AlbumName][ArtistNames...]"
-func (c *SpotifyLibraryCache) addTrackToSearchTree(v spotify.SavedTrack) () {
-    var artistNames []string
-    for _, a := range v.Artists {
-        artistNames = append(artistNames, a.Name)
-    }
-
-    c.searchTree.Add(trackIndexString(v.Name, v.Album.Namem, artisNames))
+func (c *SpotifyLibraryCache) addTrackToSearchTree(v spotify.SavedTrack) {
+    searchTerm := trackIndexString(v.Name, v.Album.Name, getArtistNames(v.SimpleTrack))
+    log.Printf("Adding search term %s to the tree", searchTerm)
+    c.searchTree.Add(searchTerm)
 }
 
 // GetByID returns the corresponding SavedTRack for the provided key if it exists and the cache is
@@ -98,26 +100,56 @@ func (c *SpotifyLibraryCache) GetByID(k spotify.ID) (*spotify.SavedTrack, error)
 	return v, nil
 }
 
+func (c *SpotifyLibraryCache) indexTrack(k spotify.ID, v spotify.SavedTrack) {
+	c.items[k] = &v
+    c.addTrackToSearchTree(v)
+}
+
 // Put adds the provided key-value pair (ID -> SavedTrack) to the cache
 func (c *SpotifyLibraryCache) Put(k spotify.ID, v spotify.SavedTrack) error {
 	err := c.readyCache()
 	if err != nil {
 		return err
 	}
-	c.items[k] = &v
-    c.addTrackToSearchTree(v)
+    c.indexTrack(k, v)
 	return nil
 }
 
+func containsAll(list1, list2 []string) bool {
+    if len(list2) != len(list2) {
+        return false
+    }
+
+    containsAll := true
+    for _, e1 := range list1 {
+        found := false
+        for _, e2 := range list2 {
+            found = found || e1 == e2
+        }
+        containsAll = containsAll && found
+    }
+    return containsAll
+
+}
+
 // GetBySongArtistAlbum gets all tracks with the same song name, artist name, and album title
-func (c *SpotifyLibraryCache) GetBySongArtistAlbum(songName, albumName string, artistNames []string) ([]*spotify.SavedTrack, error) {
-    searchStr = trackIndexString(songName, albumName, artistNames)
-    if c.Contains(searchStr) {
+func (c *SpotifyLibraryCache) GetBySongAlbumArtistNames(songName, albumName string, artistNames []string) ([]*spotify.SavedTrack, error) {
+	err := c.readyCache()
+	if err != nil {
+		return nil, err
+	}
+    searchStr := trackIndexString(songName, albumName, artistNames)
+    if c.searchTree.Contains(searchStr) {
+        log.Printf("Found %s in the search tree, checking the cache for this item", searchStr)
         // search entire cache for songs that match these fields
         var matches []*spotify.SavedTrack
         for _, v := range c.items {
-            
+            if v.Name == songName && v.Album.Name == albumName && containsAll(getArtistNames(v.SimpleTrack), artistNames) {
+                log.Printf("Found track %v which matches search string %s", v, searchStr)
+                matches = append(matches, v)
+            }
         }
+        return matches, nil
     } else {
         return nil, nil
     }
@@ -140,7 +172,7 @@ func (c *SpotifyLibraryCache) readyCache() error {
 	for {
         log.Printf("Built %d/%d tracks...", trackPager.Offset, trackPager.Total)
 		for _, t := range trackPager.Tracks {
-			c.items[t.ID] = &t
+            c.indexTrack(t.ID, t)
 		}
 		err := spClient.NextPage(trackPager)
 		if err != nil {
@@ -264,7 +296,7 @@ func HandleCleanPotentials(w http.ResponseWriter, r *http.Request) {
 func refreshLibraryCache() error {
 	if libraryCache != nil {
 		// Quick cache health check, will rebuild the cache if it has expired
-		libraryCache.Get(spotify.ID(""))
+		libraryCache.GetByID(spotify.ID(""))
 		return nil
 	}
 	c, err := NewSpotifyLibraryCache()
@@ -287,6 +319,7 @@ func cleanPotentials(dryRun bool) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+    log.Printf("Words in the library search tree: %v", libraryCache.dumpTree())
 
 	// Clean the playlist page by page cross-referencing the library cache
 	pager := &playlist.Tracks
@@ -322,6 +355,13 @@ func TrackString(t spotify.FullTrack) string {
     return fmt.Sprintf("%s, %s, on %s released %s, Track ID: %s\n",  t.Name, artistString, t.Album.Name, t.Album.ReleaseDate, t.ID)
 }
 
+func getArtistNames(t spotify.SimpleTrack) []string {
+    var names []string
+    for _, a := range t.Artists {
+        names = append(names, a.Name)
+    }
+    return names
+}
 
 // cleanPotentialsPage also returns the number of duplicate tracks cleaned on the given page
 func cleanPotentialsPage(page []spotify.PlaylistTrack, playlistID spotify.ID, dryRun bool) (spotify.ID, int, error) {
@@ -329,7 +369,7 @@ func cleanPotentialsPage(page []spotify.PlaylistTrack, playlistID spotify.ID, dr
 	for _, playlistTrack := range page {
 		trackID := playlistTrack.Track.ID
         // first try to get the track by ID
-		libraryTrack, err := libraryCache.Get(trackID)
+		libraryTrack, err := libraryCache.GetByID(trackID)
 		if err != nil {
 			return spotify.ID(""), 0, err
 		}
@@ -340,8 +380,17 @@ func cleanPotentialsPage(page []spotify.PlaylistTrack, playlistID spotify.ID, dr
             continue
 		}
         // next try to match the track metadata to something in our library
-        //trackName := playlistTrack.Track.Name
-        if libraryCache.trackName
+        //trackName := playlistTrack.errck.Name
+        duplicateLibraryTracks, err := libraryCache.GetBySongAlbumArtistNames(playlistTrack.Track.Name, playlistTrack.Track.Album.Name, getArtistNames(playlistTrack.Track.SimpleTrack))
+        if err != nil {
+            return spotify.ID(""), 0, err
+        }
+        // Means we found at least one library track which is a
+        // name-album-artist duplicate
+        if len(duplicateLibraryTracks) > 0 {
+            log.Printf("Found some non-ID duplicates! %v", duplicateLibraryTracks)
+			duplicateTracks = append(duplicateTracks, playlistTrack)
+        }
 	}
 
     if dryRun {
