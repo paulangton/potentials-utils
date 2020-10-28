@@ -21,6 +21,7 @@ import (
 
 var runserver bool
 var dryRun bool
+var aggressive bool
 
 var (
 	clientCh             = make(chan *spotify.Client)
@@ -85,7 +86,6 @@ func trackIndexString(trackName, albumName string, artistNames []string) string 
 // string "[TrackName][AlbumName][ArtistNames...]"
 func (c *SpotifyLibraryCache) addTrackToSearchTree(v spotify.SavedTrack) {
     searchTerm := trackIndexString(v.Name, v.Album.Name, getArtistNames(v.SimpleTrack))
-    log.Printf("Adding search term %s to the tree", searchTerm)
     c.searchTree.Add(searchTerm)
 }
 
@@ -283,7 +283,7 @@ func HandleCleanPotentials(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("200 - OK"))
 	log.Printf("%s - OK", r.URL.Path)
-	cleaned, err := cleanPotentials(false)
+	cleaned, err := cleanPotentials(false, true)
 	if err != nil {
 		log.Printf("Error cleaning potentials playlist: %v", err)
 		return
@@ -305,7 +305,7 @@ func refreshLibraryCache() error {
 	return nil
 }
 
-func cleanPotentials(dryRun bool) (int, error) {
+func cleanPotentials(dryRun, aggressive bool) (int, error) {
 	// First build a cache of my library
 	err := refreshLibraryCache()
 	if err != nil {
@@ -322,7 +322,7 @@ func cleanPotentials(dryRun bool) (int, error) {
 	pager := &playlist.Tracks
 	numCleaned := 0
 	for {
-		_, numCleanedForPage, err := cleanPotentialsPage(pager.Tracks, potentialsPlaylistID, dryRun)
+		_, numCleanedForPage, err := cleanPotentialsPage(pager.Tracks, potentialsPlaylistID, dryRun, aggressive)
 		if err != nil {
 			return 0, err
 		}
@@ -361,7 +361,7 @@ func getArtistNames(t spotify.SimpleTrack) []string {
 }
 
 // cleanPotentialsPage also returns the number of duplicate tracks cleaned on the given page
-func cleanPotentialsPage(page []spotify.PlaylistTrack, playlistID spotify.ID, dryRun bool) (spotify.ID, int, error) {
+func cleanPotentialsPage(page []spotify.PlaylistTrack, playlistID spotify.ID, dryRun, aggressive bool) (spotify.ID, int, error) {
 	duplicateTracks := []spotify.PlaylistTrack{}
 	for _, playlistTrack := range page {
 		trackID := playlistTrack.Track.ID
@@ -376,16 +376,17 @@ func cleanPotentialsPage(page []spotify.PlaylistTrack, playlistID spotify.ID, dr
 			duplicateTracks = append(duplicateTracks, playlistTrack)
             continue
 		}
-        // next try to match the track metadata to something in our library
-        //trackName := playlistTrack.errck.Name
-        duplicateLibraryTracks, err := libraryCache.GetBySongAlbumArtistNames(playlistTrack.Track.Name, playlistTrack.Track.Album.Name, getArtistNames(playlistTrack.Track.SimpleTrack))
-        if err != nil {
-            return spotify.ID(""), 0, err
-        }
-        // Means we found at least one library track which is a
-        // name-album-artist duplicate
-        if len(duplicateLibraryTracks) > 0 {
-			duplicateTracks = append(duplicateTracks, playlistTrack)
+        // if aggressive cleaning, try to match the track metadata to something in our library
+        if aggressive {
+            duplicateLibraryTracks, err := libraryCache.GetBySongAlbumArtistNames(playlistTrack.Track.Name, playlistTrack.Track.Album.Name, getArtistNames(playlistTrack.Track.SimpleTrack))
+            if err != nil {
+                return spotify.ID(""), 0, err
+            }
+            // Means we found at least one library track which is a
+            // name-album-artist duplicate
+            if len(duplicateLibraryTracks) > 0 {
+                duplicateTracks = append(duplicateTracks, playlistTrack)
+            }
         }
 	}
 
@@ -411,7 +412,8 @@ func cleanPotentialsPage(page []spotify.PlaylistTrack, playlistID spotify.ID, dr
 func main() {
 
     flag.BoolVar(&runserver, "runserver", false, "runs potentials-utils in server mode")
-    flag.BoolVar(&dryRun, "dry-run", false, "prints tracks that would be deleted from potentials instead of removing them if true")
+    flag.BoolVar(&dryRun, "dry-run", false, "prints tracks that would be deleted from Potentials instead of removing them if true")
+    flag.BoolVar(&aggressive, "aggressive", false, "If true, enables more aggressive cleaning, removes tracks from Potentials which match the song name, album name, and all artist names of an existing track in your library. Tracks will onlly be removed by ID otherwise.")
     flag.Parse()
 
     if runserver {
@@ -423,7 +425,7 @@ func main() {
         if dryRun {
             log.Printf("Running cleanPotentials in dry-run mode. No tracks will be deleted from your playlist.")
         }
-        cleaned, err := cleanPotentials(dryRun)
+        cleaned, err := cleanPotentials(dryRun, aggressive)
         if err != nil {
             log.Fatalf(err.Error())
         }
