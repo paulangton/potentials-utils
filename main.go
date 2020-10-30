@@ -19,9 +19,12 @@ import (
     "potentials-utils/prefixtree"
 )
 
-var runserver bool
-var dryRun bool
-var aggressive bool
+var (
+    runserver bool
+    dryRun bool
+    aggressive bool
+    noCache bool
+)
 
 var (
 	clientCh             = make(chan *spotify.Client)
@@ -414,6 +417,7 @@ func main() {
     flag.BoolVar(&runserver, "runserver", false, "runs potentials-utils in server mode")
     flag.BoolVar(&dryRun, "dry-run", false, "prints tracks that would be deleted from Potentials instead of removing them if true")
     flag.BoolVar(&aggressive, "aggressive", false, "If true, enables more aggressive cleaning, removes tracks from Potentials which match the song name, album name, and all artist names of an existing track in your library. Tracks will onlly be removed by ID otherwise.")
+    flag.BoolVar(&noCache, "no-cache", false, "If true, invalidates your library cache and rebuilds it from scratch")
     flag.Parse()
 
     if runserver {
