@@ -10,7 +10,7 @@ where you put all those music recommendations you get from family, friends, cowo
 
 Spotify does not have great tooling for supporting this pattern, thus `potentials-utils` came to be.
 
-## What does this actually solve
+## So why do you need software for this
 
 ### Duplicate tracks
 1. Sometimes you'll hear a song you like. You'll add it to your library and then get curious about
@@ -30,6 +30,13 @@ The problem here is obvious: with the existence of duplicates, you will occasion
 `potentials-utils` takes care of this by automatically removing duplicate tracks from your
 Potentials playlist.
 
+[//]: # ### Removing songs you "Don't like" [Coming soon]
+[//]: # If I'm not going to take the time to go back and remove songs from Potentials that I like
+[//]: # but have already added to my library, there is not a single chance I'm going to
+[//]: # go back and remove songs I DON'T like from the playlist.
+[//]: #
+[//]: # `potentials-utils` will also expire songs from your playlist that it thinks you don't like.
+[//]: #
 ## I'd like to use this
 1. Clone this repository
     ```
