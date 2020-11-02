@@ -4,7 +4,7 @@ spotify:
     user: Your Spotify User
     callbackURL: http://localhost:8080/callback/spotify
     potentialsPlaylistID: Your Potentials Playlist ID
-    authTimeoutMs: 60000 # 1 Minute
+    authTimeoutNs: 6.0e+11 # 10 Minutes
 
 
 duplicates:
@@ -12,4 +12,4 @@ duplicates:
 
 cache: 
     cacheDir: .cache
-    lifetimeMs: 86400000 # 1 Day
+    lifetimeNs: 8.64e+13 # 1 Day
