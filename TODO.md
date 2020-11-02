@@ -6,6 +6,8 @@
 ## Features
 - Deduplicate real library tracks
 - Minimal web interface
+- Automatic removal of tracks that can be safely assumed i "don't like". Maybe:
+  older than a year, >20 listens?
 
 ## Optimization
 - Write cache to disk, read it back so that repeated one-off runs don't take so

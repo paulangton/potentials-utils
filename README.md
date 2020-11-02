@@ -42,9 +42,10 @@ Potentials playlist.
 ```
 make build
 ```
-1. Run `potentials-utils` 
+1. Run `potentials-utils` in dry-run mode to make sure it's not removing
+   anything to want to keep :)
 ```
-./bin/potentials-utils
+./bin/potentials-utils --dry-run
 ```
 
 ### Deploying your own potentials-utils
