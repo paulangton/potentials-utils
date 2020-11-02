@@ -10,6 +10,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"os"
     "context"
     "strings"
     "io/ioutil"
@@ -297,17 +298,14 @@ func HandleAuthCallback(w http.ResponseWriter, r *http.Request) {
 	// use the same state string here that you used to generate the URL
 	token, err := auth.Token(sessionKey, r)
 	if err != nil {
-        log.Printf("Received auth callback, failed.")
-		http.Error(w, fmt.Sprintf("Couldn't get token from sessionkey %s, request %v", sessionKey, r), http.StatusNotFound)
+		http.Error(w, "Couldn't get token", http.StatusNotFound)
 		return
 	}
-    log.Printf("Got token %v", token)
 	// create a client using the specified token
 	c := auth.NewClient(token)
 	clientCh <- &c
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("200 - OK"))
-    log.Printf("Created client, auth flow complete")
 }
 
 // HandleCleanPotentials cleans my potentials playlist. It removes all songs i have already saved in
@@ -459,12 +457,10 @@ func main() {
         log.Fatalf("Failed to unmarshal YAML config, err: %v", err)
     }
 	auth = spotify.NewAuthenticator(config.Spotify.CallbackURL, spotify.ScopeUserReadPrivate, spotify.ScopePlaylistReadPrivate, spotify.ScopePlaylistModifyPublic, spotify.ScopePlaylistModifyPrivate, spotify.ScopeUserLibraryRead)
-    // Stupid library reads by default from environment variables so we have to
-    // manually set credentials here.
-    auth.SetAuthInfo(config.Spotify.ID, config.Spotify.Secret)
-    rand.Seed(time.Now().UTC().UnixNano())
+    log.Printf("using config %v", config)
 
     if runserver {
+        rand.Seed(time.Now().Unix())
         log.Printf("Server UP")
         authSrv := authServer()
         log.Fatal(authSrv.ListenAndServe())
