@@ -71,22 +71,42 @@ type PotentialsUtilsConfig struct {
 	Cache      CacheConfig      `yaml:"cache"`
 }
 
+// StoredLibrary is a serialization type for storing a library on disk
+type StoredLibrary struct {
+	Expiration time.Time            `json:"expiration,omitempty"`
+	Tracks     []spotify.SavedTrack `json:"tracks,omitempty"`
+}
+
 // LibraryService is responsible for interfacing with the potentials-utils local
 // spotify library
 type LibraryService struct {
 	CacheDir     string
-	CacheName    string
+	CacheFile    string
 	libraryIndex *SpotifyLibraryIndex
 }
 
+// NewStoredLibrary creates a new StoredLibrary with sensible defaults
+func NewStoredLibrary() *StoredLibrary {
+	return &StoredLibrary{
+		Expiration: time.Now(),
+		Tracks:     []spotify.SavedTrack{},
+	}
+}
+
+// NewLibraryService creates a new LibraryService instance. The instance will
+// attempt to build its cache from the provided cache directory.
 func NewLibraryService(cacheDir string) (*LibraryService, error) {
+	err := AuthMe()
+	if err != nil {
+		return nil, err
+	}
 	libraryService := &LibraryService{
 		CacheDir:     cacheDir,
-		CacheName:    "library.json",
+		CacheFile:    path.Join(cacheDir, "library.json"),
 		libraryIndex: &SpotifyLibraryIndex{},
 	}
 
-	err := libraryService.readyLibrary()
+	err = libraryService.readyLibrary()
 	if err != nil {
 		return nil, err
 	}
@@ -98,13 +118,21 @@ func NewLibraryService(cacheDir string) (*LibraryService, error) {
 }
 
 func (s *LibraryService) persistLibrary() error {
-	mode := os.FileMode(int(755))
-	bytes, err := json.Marshal(s.libraryIndex)
+	mode := os.FileMode(uint32(0755))
+	storedLibrary := NewStoredLibrary()
+	storedLibrary.Expiration = s.libraryIndex.evictionTime
+	for _, v := range s.libraryIndex.tracksByID {
+		storedLibrary.Tracks = append(storedLibrary.Tracks, *v)
+	}
+	bytes, err := json.Marshal(storedLibrary)
 	if err != nil {
 		return err
 	}
 	err = os.MkdirAll(s.CacheDir, mode)
-	err = ioutil.WriteFile(path.Join(s.CacheDir, s.CacheName), bytes, mode)
+	if err != nil {
+		return err
+	}
+	err = ioutil.WriteFile(s.CacheFile, bytes, mode)
 	if err != nil {
 		return err
 	}
@@ -115,22 +143,64 @@ func (s *LibraryService) readyLibrary() error {
 	if s.libraryIndex.Alive() {
 		return nil
 	}
-	cache, err := NewSpotifyLibraryIndexFromFile(s.CacheDir)
-	if err == SpotifyLibraryIndexCreateError {
-		cache, err = NewSpotifyLibraryIndex()
-		if err != nil {
+	if err := s.indexFromCacheFile(); err != nil {
+		log.Printf("Failed to build index from cache, error: %v", err)
+		if err = s.indexFromSpotify(); err != nil {
 			return err
 		}
 	}
+	return nil
+}
+
+func (s *LibraryService) indexFromSpotify() error {
+	index := NewSpotifyLibraryIndex()
+	log.Printf("Rebuilding Spotify library cache index...")
+	trackPager, err := spClient.CurrentUsersTracks()
 	if err != nil {
 		return err
 	}
-	s.libraryIndex = cache
+	for {
+		log.Printf("Built %d/%d tracks...", trackPager.Offset, trackPager.Total)
+		for _, t := range trackPager.Tracks {
+			index.IndexTrack(t.ID, t)
+		}
+		err := spClient.NextPage(trackPager)
+		if err != nil {
+			if err != spotify.ErrNoMorePages {
+				return err
+			}
+			break
+		}
+	}
+	index.MakeItFresh()
+	s.libraryIndex = index
 	return nil
-
 }
 
-// GetByID returns the corresponding SavedTRack for the provided key if it exists and the cache is
+func (s *LibraryService) indexFromCacheFile() error {
+	index := NewSpotifyLibraryIndex()
+	file, err := os.Open(s.CacheFile)
+	if err != nil {
+		return err
+	}
+	slurp, err := ioutil.ReadAll(file)
+	if err != nil {
+		return err
+	}
+	var storedLibrary *StoredLibrary
+	err = json.Unmarshal(slurp, &storedLibrary)
+	if err != nil {
+		return err
+	}
+	for _, t := range storedLibrary.Tracks {
+		index.IndexTrack(t.ID, t)
+	}
+	index.evictionTime = storedLibrary.Expiration
+	s.libraryIndex = index
+	return nil
+}
+
+// GetByID returns the corresponding SavedTrack for the provided key if it exists and the cache is
 // fresh. Will rebuild the cache if stale.
 func (s *LibraryService) GetByID(k spotify.ID) (*spotify.SavedTrack, error) {
 	err := s.readyLibrary()
@@ -141,7 +211,8 @@ func (s *LibraryService) GetByID(k spotify.ID) (*spotify.SavedTrack, error) {
 	return v, nil
 }
 
-// GetBySongArtistAlbum gets all tracks with the same song name, artist name, and album title
+// GetBySongArtistAlbum gets all tracks with the same song name, artist name,
+// and album title. Will rebuild cache if stale.
 func (s *LibraryService) GetBySongAlbumArtistNames(songName, albumName string, artistNames []string) ([]*spotify.SavedTrack, error) {
 	err := s.readyLibrary()
 	if err != nil {
@@ -178,43 +249,14 @@ func (c *SpotifyLibraryIndex) dumpTree() []string {
 	return c.trackSearchTree.Words()
 }
 
-// NewSpotifyLibraryIndexFromFile creates a SpotifyLibraryIndex from a saved
-// cache on disk
-func NewSpotifyLibraryIndexFromFile(path string) (*SpotifyLibraryIndex, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, SpotifyLibraryIndexCreateError
-	}
-	slurp, err := ioutil.ReadAll(file)
-	if err != nil {
-		return nil, SpotifyLibraryIndexCreateError
-	}
-	var index *SpotifyLibraryIndex
-	err = json.Unmarshal(slurp, &index)
-	if err != nil {
-		return nil, err
-	}
-	return index, nil
-
-}
-
 // NewSpotifyLibraryIndex creates a SpotifyLibraryIndex with a cache lifetime of 1 day.
-func NewSpotifyLibraryIndex() (*SpotifyLibraryIndex, error) {
-	err := AuthMe()
-	if err != nil {
-		return nil, err
-	}
-	i := &SpotifyLibraryIndex{
+func NewSpotifyLibraryIndex() *SpotifyLibraryIndex {
+	return &SpotifyLibraryIndex{
 		tracksByID:      map[spotify.ID]*spotify.SavedTrack{},
 		trackSearchTree: prefixtree.NewPrefixTree(),
 		lifetime:        config.Cache.Lifetime,
-		evictionTime:    time.Now(), // Eviction time will be incremented by lifetime once cache is ready
+		evictionTime:    time.Now(), // Eviction time will be
 	}
-	err = i.Rebuild()
-	if err != nil {
-		return nil, err
-	}
-	return i, nil
 
 }
 
@@ -239,9 +281,16 @@ func (i *SpotifyLibraryIndex) addTrackToSearchTree(v spotify.SavedTrack) {
 	i.trackSearchTree.Add(searchTerm)
 }
 
-func (i *SpotifyLibraryIndex) indexTrack(k spotify.ID, v spotify.SavedTrack) {
+// IndexTrack adds a track to the library index and refreshes the lifetime of
+// the index
+func (i *SpotifyLibraryIndex) IndexTrack(k spotify.ID, v spotify.SavedTrack) {
 	i.tracksByID[k] = &v
 	i.addTrackToSearchTree(v)
+}
+
+// MakeItFresh tells the library index it should be considered fresh
+func (i *SpotifyLibraryIndex) MakeItFresh() {
+	i.evictionTime = time.Now().Add(i.lifetime)
 }
 
 func containsAll(list1, list2 []string) bool {
@@ -263,33 +312,6 @@ func containsAll(list1, list2 []string) bool {
 
 func (i *SpotifyLibraryIndex) Alive() bool {
 	return time.Now().Before(i.evictionTime)
-}
-
-func (i *SpotifyLibraryIndex) Rebuild() error {
-
-	// Cache has expired, need to rebuild
-	log.Printf("Rebuilding Spotify library cache index...")
-	trackPager, err := spClient.CurrentUsersTracks()
-	if err != nil {
-		return err
-	}
-	for {
-		log.Printf("Built %d/%d tracks...", trackPager.Offset, trackPager.Total)
-		for _, t := range trackPager.Tracks {
-			i.indexTrack(t.ID, t)
-		}
-		err := spClient.NextPage(trackPager)
-		if err != nil {
-			if err != spotify.ErrNoMorePages {
-				return err
-			}
-			break
-		}
-	}
-	i.evictionTime = time.Now().Add(i.lifetime)
-	log.Printf("Successfully built library cache of %d tracks.", len(i.tracksByID))
-	return nil
-
 }
 
 func authServer() *http.Server {
@@ -515,16 +537,16 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to unmarshal YAML config, err: %v", err)
 	}
-	libraryService, err = NewLibraryService(config.Cache.CacheDir)
-	if err != nil {
-		log.Fatalf("Failed to start the potentials-utils library service, error: %v", err)
-	}
 	auth = spotify.NewAuthenticator(config.Spotify.CallbackURL, spotify.ScopeUserReadPrivate, spotify.ScopePlaylistReadPrivate, spotify.ScopePlaylistModifyPublic, spotify.ScopePlaylistModifyPrivate, spotify.ScopeUserLibraryRead)
 	// Stupid library reads by default from environment variables so we have to
 	// manually set credentials here.
 	auth.SetAuthInfo(config.Spotify.ID, config.Spotify.Secret)
 	rand.Seed(time.Now().UTC().UnixNano())
 
+	libraryService, err = NewLibraryService(config.Cache.CacheDir)
+	if err != nil {
+		log.Fatalf("Failed to start the potentials-utils library service, error: %v", err)
+	}
 	if runserver {
 		log.Printf("Server UP")
 		authSrv := authServer()
