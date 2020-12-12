@@ -4,91 +4,177 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"flag"
 	"fmt"
-    "flag"
-    "sort"
+	"io/ioutil"
 	"log"
 	"math/rand"
 	"net/http"
-    "context"
-    "strings"
-    "io/ioutil"
+	"os"
+	"path"
+	"sort"
+	"strings"
 	"time"
-    "gopkg.in/yaml.v2"
+
+	"gopkg.in/yaml.v2"
+
+	"potentials-utils/prefixtree"
 
 	"github.com/zmb3/spotify"
-    "potentials-utils/prefixtree"
 )
 
 var (
-	clientCh             = make(chan *spotify.Client)
-    auth spotify.Authenticator
+	clientCh     = make(chan *spotify.Client)
+	auth         spotify.Authenticator
 	spClient     *spotify.Client
-	libraryCache *SpotifyLibraryCache
+	libraryCache *SpotifyLibraryIndex
 	sessionKey   string
-    config *PotentialsUtilsConfig
-    cfgPath string
-    runserver bool
-    dryRun bool
-    noCache bool
+	config       *PotentialsUtilsConfig
+	cfgPath      string
+	runserver    bool
+	dryRun       bool
+	noCache      bool
 )
 
+type SpotifyLibraryIndexCreateError struct{}
+
+func (e *SpotifyLibraryIndexCreateError) Error() {
+	return "Error creating Spotify library cache"
+}
+
 type CacheConfig struct {
-    Lifetime time.Duration `yaml:"lifetimeNs"`
-    CacheDir string `yaml:"cacheDir"`
+	Lifetime time.Duration `yaml:"lifetimeNs"`
+	CacheDir string        `yaml:"cacheDir"`
 }
 
 // DuplicatesConfig holds config options for potentials-utils' duplicate
 // detection behavior
 type DuplicatesConfig struct {
-    // Aggressive controls cleaning aggression levels. If true, enables more
-    // aggressive cleaning which will remove tracks from Potentials which match
-    // the song name, album name, and all artist names of an existing track in
-    // your library. Tracks will onlly be removed by ID otherwise.
-    Aggressive bool `yaml:"aggressive"`
+	// Aggressive controls cleaning aggression levels. If true, enables more
+	// aggressive cleaning which will remove tracks from Potentials which match
+	// the song name, album name, and all artist names of an existing track in
+	// your library. Tracks will onlly be removed by ID otherwise.
+	Aggressive bool `yaml:"aggressive"`
 }
 
 type SpotifyConfig struct {
-    ID string `yaml:"id"`
-    Secret string `yaml:"secret"`
-    CallbackURL string `yaml:"callbackURL"`
-    User string `yaml:"user"`
-    PotentialsPlaylistID spotify.ID `yaml:"potentialsPlaylistID"`
-    AuthTimeout time.Duration `yaml:"authTimeoutNs"`
+	ID                   string        `yaml:"id"`
+	Secret               string        `yaml:"secret"`
+	CallbackURL          string        `yaml:"callbackURL"`
+	User                 string        `yaml:"user"`
+	PotentialsPlaylistID spotify.ID    `yaml:"potentialsPlaylistID"`
+	AuthTimeout          time.Duration `yaml:"authTimeoutNs"`
 }
 
 type PotentialsUtilsConfig struct {
-    Spotify SpotifyConfig `yaml:"spotify"`
-    Duplicates DuplicatesConfig `yaml:"duplicates"`
-    Cache CacheConfig `yaml:"cache"`
+	Spotify    SpotifyConfig    `yaml:"spotify"`
+	Duplicates DuplicatesConfig `yaml:"duplicates"`
+	Cache      CacheConfig      `yaml:"cache"`
 }
 
-// SpotifyLibraryCache represents an in-memory cache of the current users' spotify library. It must
+// LibraryService is responsible for interfacing with the potentials-utils
+// spotify library
+type LibraryService struct {
+	CacheDir     string
+	libraryIndex SpotifyLibraryIndex
+}
+
+func NewLibraryService(cacheDir string) (*LibraryService, error) {
+	libraryService := &LibraryService{
+		CacheDir:     cacheDir,
+		CacheName:    "library.json",
+		libraryIndex: &SpotifyLibraryIndex{},
+	}
+
+	err := libraryService.readyLibrary()
+	if err != nil {
+		return nil, err
+	}
+	err = libraryService.persistLibrary()
+	if err != nil {
+		return nil, err
+	}
+	return libraryService
+}
+
+func (s *LibraryService) persistLibrary() error {
+	bytes, err := json.Marshal(s.libraryIndex)
+	if err != nil {
+		return err
+	}
+	err := ioutil.WriteFile(bytes, path.Join(s.CacheDir, s.CacheName), os.O_RDWR)
+	if err != nil {
+		return nil
+	}
+}
+
+func (s *LibraryService) readyLibrary() error {
+	if s.libraryIndex.Alive() {
+		return nil
+	}
+	cache, err := NewSpotifyLibraryIndexFromFile(s.cacheDir)
+	if err == SpotifyLibraryIndexCreateError {
+		cache, err = NewSpotifyLibraryIndex()
+		if err != nil {
+			return err
+		}
+	}
+	if err != nil {
+		return err
+	}
+	s.libraryIndex = cache
+	return nil
+
+}
+
+// SpotifyLibraryIndex represents an in-memory cache of the current users' spotify library. It must
 // be completely rebuilt if the current time is after the evictionTime. Yeah I
 // know this is basically a hand-tuned database, I did it for fun go read a book
-type SpotifyLibraryCache struct {
-	items    map[spotify.ID]*spotify.SavedTrack
-    searchTree *prefixtree.PrefixTree
-	lifetime time.Duration
+type SpotifyLibraryIndex struct {
+	tracksByID      map[spotify.ID]*spotify.SavedTrack `json:"items"`
+	trackSearchTree *prefixtree.PrefixTree             `json:"searchTree"`
+	lifetime        time.Duration                      `json:"lifetime"`
 	// This cache has to be completely rebuilt, no element-wise evictions
-	evictionTime time.Time
+	evictionTime time.Time `json:"evictionTime"`
 }
 
-func (c *SpotifyLibraryCache) dumpTree() []string {
-    return c.searchTree.Words()
+func (c *SpotifyLibraryIndex) dumpTree() []string {
+	return c.trackSearchTree.Words()
 }
 
-// NewSpotifyLibraryCache creates a SpotifyLibraryCache with a lifetime of 1 day.
-func NewSpotifyLibraryCache() (*SpotifyLibraryCache, error) {
+// NewSpotifyLibraryIndexFromFile creates a SpotifyLibraryIndex from a saved
+// cache on disk
+func NewSpotifyLibraryIndexFromFile(path string) (*SpotifyLibraryIndex, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, &SpotifyLibraryIndexCreateError{}
+	}
+	slurp, err := ioutil.ReadAll(file)
+	if err != nil {
+		return nil, &SpotifyLibraryIndexCreateError{}
+	}
+	var index *SpotifyLibraryIndex
+	err := json.Unmarshal(slurp, &index)
+	if err != nil {
+		return nil, err
+	}
+	return index, nil
+
+}
+
+// NewSpotifyLibraryIndex creates a SpotifyLibraryIndex with a cache lifetime of 1 day.
+func NewSpotifyLibraryIndex() (*SpotifyLibraryIndex, error) {
 	err := AuthMe()
 	if err != nil {
 		return nil, err
 	}
-	c := &SpotifyLibraryCache{
-		items:        map[spotify.ID]*spotify.SavedTrack{},
-        searchTree:   prefixtree.NewPrefixTree(),
-		lifetime:     config.Cache.Lifetime,
-		evictionTime: time.Now(), // Eviction time will be incremented by lifetime once cache is ready
+	c := &SpotifyLibraryIndex{
+		tracksByID:      map[spotify.ID]*spotify.SavedTrack{},
+		trackSearchTree: prefixtree.NewPrefixTree(),
+		lifetime:        config.Cache.Lifetime,
+		evictionTime:    time.Now(), // Eviction time will be incremented by lifetime once cache is ready
 	}
 	err = c.readyCache()
 	if err != nil {
@@ -99,94 +185,97 @@ func NewSpotifyLibraryCache() (*SpotifyLibraryCache, error) {
 }
 
 func trackIndexString(trackName, albumName string, artistNames []string) string {
-    var indexStrBuilder strings.Builder
-    // Song namr
-    indexStrBuilder.WriteString(fmt.Sprintf("%s", trackName))
-    // Album name
-    indexStrBuilder.WriteString(fmt.Sprintf("%s", albumName))
-    // Each artist name, in alphabetical order
-    sort.Strings(artistNames)
-    for _, a := range artistNames {
-        indexStrBuilder.WriteString(fmt.Sprintf("%s", a))
-    }
-    return indexStrBuilder.String()
+	var indexStrBuilder strings.Builder
+	// Song name
+	indexStrBuilder.WriteString(fmt.Sprintf("%s", trackName))
+	// Album name
+	indexStrBuilder.WriteString(fmt.Sprintf("%s", albumName))
+	// Each artist name, in alphabetical order
+	sort.Strings(artistNames)
+	for _, a := range artistNames {
+		indexStrBuilder.WriteString(fmt.Sprintf("%s", a))
+	}
+	return indexStrBuilder.String()
 }
 
 // addTrackToSearchTree adds tracks to the search tree using a custom track
 // string "[TrackName][AlbumName][ArtistNames...]"
-func (c *SpotifyLibraryCache) addTrackToSearchTree(v spotify.SavedTrack) {
-    searchTerm := trackIndexString(v.Name, v.Album.Name, getArtistNames(v.SimpleTrack))
-    c.searchTree.Add(searchTerm)
+func (c *SpotifyLibraryIndex) addTrackToSearchTree(v spotify.SavedTrack) {
+	searchTerm := trackIndexString(v.Name, v.Album.Name, getArtistNames(v.SimpleTrack))
+	c.trackSearchTree.Add(searchTerm)
 }
 
 // GetByID returns the corresponding SavedTRack for the provided key if it exists and the cache is
 // fresh. Will rebuild the cache if stale.
-func (c *SpotifyLibraryCache) GetByID(k spotify.ID) (*spotify.SavedTrack, error) {
+func (c *SpotifyLibraryIndex) GetByID(k spotify.ID) (*spotify.SavedTrack, error) {
 	err := c.readyCache()
 	if err != nil {
 		return nil, err
 	}
-	v := c.items[k]
+	v := c.tracksByID[k]
 	return v, nil
 }
 
-func (c *SpotifyLibraryCache) indexTrack(k spotify.ID, v spotify.SavedTrack) {
-	c.items[k] = &v
-    c.addTrackToSearchTree(v)
+func (c *SpotifyLibraryIndex) indexTrack(k spotify.ID, v spotify.SavedTrack) {
+	c.tracksByID[k] = &v
+	c.addTrackToSearchTree(v)
 }
 
 // Put adds the provided key-value pair (ID -> SavedTrack) to the cache
-func (c *SpotifyLibraryCache) Put(k spotify.ID, v spotify.SavedTrack) error {
+func (c *SpotifyLibraryIndex) Put(k spotify.ID, v spotify.SavedTrack) error {
 	err := c.readyCache()
 	if err != nil {
 		return err
 	}
-    c.indexTrack(k, v)
+	c.indexTrack(k, v)
 	return nil
 }
 
 func containsAll(list1, list2 []string) bool {
-    if len(list2) != len(list2) {
-        return false
-    }
+	if len(list2) != len(list2) {
+		return false
+	}
 
-    containsAll := true
-    for _, e1 := range list1 {
-        found := false
-        for _, e2 := range list2 {
-            found = found || e1 == e2
-        }
-        containsAll = containsAll && found
-    }
-    return containsAll
+	containsAll := true
+	for _, e1 := range list1 {
+		found := false
+		for _, e2 := range list2 {
+			found = found || e1 == e2
+		}
+		containsAll = containsAll && found
+	}
+	return containsAll
 
 }
 
 // GetBySongArtistAlbum gets all tracks with the same song name, artist name, and album title
-func (c *SpotifyLibraryCache) GetBySongAlbumArtistNames(songName, albumName string, artistNames []string) ([]*spotify.SavedTrack, error) {
+func (c *SpotifyLibraryIndex) GetBySongAlbumArtistNames(songName, albumName string, artistNames []string) ([]*spotify.SavedTrack, error) {
 	err := c.readyCache()
 	if err != nil {
 		return nil, err
 	}
-    searchStr := trackIndexString(songName, albumName, artistNames)
-    if c.searchTree.Contains(searchStr) {
-        // search entire cache for songs that match these fields
-        var matches []*spotify.SavedTrack
-        for _, v := range c.items {
-            if v.Name == songName && v.Album.Name == albumName && containsAll(getArtistNames(v.SimpleTrack), artistNames) {
-                matches = append(matches, v)
-            }
-        }
-        return matches, nil
-    } else {
-        return nil, nil
-    }
+	searchStr := trackIndexString(songName, albumName, artistNames)
+	if c.trackSearchTree.Contains(searchStr) {
+		// search entire cache for songs that match these fields
+		var matches []*spotify.SavedTrack
+		for _, v := range c.tracksByID {
+			if v.Name == songName && v.Album.Name == albumName && containsAll(getArtistNames(v.SimpleTrack), artistNames) {
+				matches = append(matches, v)
+			}
+		}
+		return matches, nil
+	} else {
+		return nil, nil
+	}
 
 }
 
+func (c *SpotifyLibraryIndex) Alive() bool {
+	return time.Now().Before(c.evictionTime)
+}
 
-func (c *SpotifyLibraryCache) readyCache() error {
-	if time.Now().Before(c.evictionTime) {
+func (c *SpotifyLibraryIndex) readyCache() error {
+	if c.Alive() {
 		// Cache has not expired yet, cache ready
 		return nil
 	}
@@ -198,9 +287,9 @@ func (c *SpotifyLibraryCache) readyCache() error {
 		return err
 	}
 	for {
-        log.Printf("Built %d/%d tracks...", trackPager.Offset, trackPager.Total)
+		log.Printf("Built %d/%d tracks...", trackPager.Offset, trackPager.Total)
 		for _, t := range trackPager.Tracks {
-            c.indexTrack(t.ID, t)
+			c.indexTrack(t.ID, t)
 		}
 		err := spClient.NextPage(trackPager)
 		if err != nil {
@@ -211,49 +300,50 @@ func (c *SpotifyLibraryCache) readyCache() error {
 		}
 	}
 	c.evictionTime = time.Now().Add(c.lifetime)
-	log.Printf("Successfully built library cache of %d tracks.", len(c.items))
+	log.Printf("Successfully built library cache of %d tracks.", len(c.tracksByID))
 	return nil
 
 }
 
 func authServer() *http.Server {
-    mux := http.NewServeMux()
+	mux := http.NewServeMux()
 
-    mux.HandleFunc("/callback/spotify", HandleAuthCallback)
-    mux.HandleFunc("/spotify/cleanpotentials", HandleCleanPotentials)
-    mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-        log.Println("Got request for:", r.URL.String())
-    })
-    srv := &http.Server{
-        Addr: ":8080",
-        Handler: mux,
-    }
-    return srv
+	mux.HandleFunc("/callback/spotify", HandleAuthCallback)
+	mux.HandleFunc("/spotify/cleanpotentials", HandleCleanPotentials)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		log.Println("Got request for:", r.URL.String())
+	})
+	srv := &http.Server{
+		Addr:    ":8080",
+		Handler: mux,
+	}
+	return srv
 
 }
+
 // AuthMe authenticates with Spotify as me and creates a client or uses the current client
 // if already authenticated.
 func AuthMe() error {
-    // no auth server up, start a one-off
-    if !runserver {
-        log.Printf("running one-off auth server")
-        authSrv := authServer()
-        go func() {
-            err := authSrv.ListenAndServe()
-            if err == http.ErrServerClosed {
-            } else {
+	// no auth server up, start a one-off
+	if !runserver {
+		log.Printf("running one-off auth server")
+		authSrv := authServer()
+		go func() {
+			err := authSrv.ListenAndServe()
+			if err == http.ErrServerClosed {
+			} else {
 
-            }
-        }()
-        ctx, cancelFunc := context.WithTimeout(context.Background(), config.Spotify.AuthTimeout)
-        defer cancelFunc()
-        defer authSrv.Shutdown(ctx)
-        err := authMeWithTimeout()
+			}
+		}()
+		ctx, cancelFunc := context.WithTimeout(context.Background(), config.Spotify.AuthTimeout)
+		defer cancelFunc()
+		defer authSrv.Shutdown(ctx)
+		err := authMeWithTimeout()
 		if err != nil {
 			return err
 		}
 
-    }
+	}
 	if spClient == nil {
 		err := authMeWithTimeout()
 		if err != nil {
@@ -297,17 +387,17 @@ func HandleAuthCallback(w http.ResponseWriter, r *http.Request) {
 	// use the same state string here that you used to generate the URL
 	token, err := auth.Token(sessionKey, r)
 	if err != nil {
-        log.Printf("Received auth callback, failed.")
+		log.Printf("Received auth callback, failed.")
 		http.Error(w, fmt.Sprintf("Couldn't get token from sessionkey %s, request %v", sessionKey, r), http.StatusNotFound)
 		return
 	}
-    log.Printf("Got token %v", token)
+	log.Printf("Got token %v", token)
 	// create a client using the specified token
 	c := auth.NewClient(token)
 	clientCh <- &c
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("200 - OK"))
-    log.Printf("Created client, auth flow complete")
+	log.Printf("Created client, auth flow complete")
 }
 
 // HandleCleanPotentials cleans my potentials playlist. It removes all songs i have already saved in
@@ -321,16 +411,16 @@ func HandleCleanPotentials(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Error cleaning potentials playlist: %v", err)
 		return
 	}
-    log.Printf("Successfully cleaned %d tracks from the potentials playlist.", cleaned)
+	log.Printf("Successfully cleaned %d tracks from the potentials playlist.", cleaned)
 }
 
 func refreshLibraryCache() error {
 	if libraryCache != nil {
-		// Quick cache health check, will rebuild the cache if it has expired
+		// Quick cache freshness check, will rebuild the cache if it has expired
 		libraryCache.GetByID(spotify.ID(""))
 		return nil
 	}
-	c, err := NewSpotifyLibraryCache()
+	c, err := NewSpotifyLibraryIndex()
 	if err != nil {
 		return err
 	}
@@ -374,23 +464,23 @@ func cleanPotentials(dryRun bool) (int, error) {
 
 // TrackString prints a human-readable summary of a spotify track
 func TrackString(t spotify.FullTrack) string {
-    artistString := ""
-    for ix, a := range t.Artists {
-        if ix == len(t.Artists) - 1 {
-            artistString += fmt.Sprintf("%s", a.Name)
-        } else {
-            artistString += fmt.Sprintf("%s, ", a.Name)
-        }
-    }
-    return fmt.Sprintf("%s, %s, on %s released %s, Track ID: %s\n",  t.Name, artistString, t.Album.Name, t.Album.ReleaseDate, t.ID)
+	artistString := ""
+	for ix, a := range t.Artists {
+		if ix == len(t.Artists)-1 {
+			artistString += fmt.Sprintf("%s", a.Name)
+		} else {
+			artistString += fmt.Sprintf("%s, ", a.Name)
+		}
+	}
+	return fmt.Sprintf("%s, %s, on %s released %s, Track ID: %s\n", t.Name, artistString, t.Album.Name, t.Album.ReleaseDate, t.ID)
 }
 
 func getArtistNames(t spotify.SimpleTrack) []string {
-    var names []string
-    for _, a := range t.Artists {
-        names = append(names, a.Name)
-    }
-    return names
+	var names []string
+	for _, a := range t.Artists {
+		names = append(names, a.Name)
+	}
+	return names
 }
 
 // cleanPotentialsPage also returns the number of duplicate tracks cleaned on the given page
@@ -398,7 +488,7 @@ func cleanPotentialsPage(page []spotify.PlaylistTrack, playlistID spotify.ID, dr
 	duplicateTracks := []spotify.PlaylistTrack{}
 	for _, playlistTrack := range page {
 		trackID := playlistTrack.Track.ID
-        // first try to get the track by ID
+		// first try to get the track by ID
 		libraryTrack, err := libraryCache.GetByID(trackID)
 		if err != nil {
 			return spotify.ID(""), 0, err
@@ -407,80 +497,80 @@ func cleanPotentialsPage(page []spotify.PlaylistTrack, playlistID spotify.ID, dr
 			// track is already in our library, remove it
 			// log.Printf("Found a duplicate track in the potentials playlist: %s by %s off the album %s (ID: %s).", track.Track.Name, track.Track.Artists[0].Name, track.Track.Album.Name, trackID)
 			duplicateTracks = append(duplicateTracks, playlistTrack)
-            continue
+			continue
 		}
-        // if aggressive cleaning, try to match the track metadata to something in our library
-        if config.Duplicates.Aggressive {
-            duplicateLibraryTracks, err := libraryCache.GetBySongAlbumArtistNames(playlistTrack.Track.Name, playlistTrack.Track.Album.Name, getArtistNames(playlistTrack.Track.SimpleTrack))
-            if err != nil {
-                return spotify.ID(""), 0, err
-            }
-            // Means we found at least one library track which is a
-            // name-album-artist duplicate
-            if len(duplicateLibraryTracks) > 0 {
-                duplicateTracks = append(duplicateTracks, playlistTrack)
-            }
-        }
+		// if aggressive cleaning, try to match the track metadata to something in our library
+		if config.Duplicates.Aggressive {
+			duplicateLibraryTracks, err := libraryCache.GetBySongAlbumArtistNames(playlistTrack.Track.Name, playlistTrack.Track.Album.Name, getArtistNames(playlistTrack.Track.SimpleTrack))
+			if err != nil {
+				return spotify.ID(""), 0, err
+			}
+			// Means we found at least one library track which is a
+			// name-album-artist duplicate
+			if len(duplicateLibraryTracks) > 0 {
+				duplicateTracks = append(duplicateTracks, playlistTrack)
+			}
+		}
 	}
 
-    if dryRun {
-        for _, t := range duplicateTracks {
-            log.Printf("[DUPLICATE] %s", TrackString(t.Track))
-        }
-        return playlistID, len(duplicateTracks), nil
-    } else {
-        ids := []spotify.ID{}
-        for _, t := range duplicateTracks {
-            ids = append(ids, t.Track.ID)
-        }
-        snapshot, err := spClient.RemoveTracksFromPlaylist(playlistID, ids...)
-        if err != nil {
-            return spotify.ID(snapshot), 0, err
-        }
-        // Return playlistID of new (mutated) playlist for next request.
-        return spotify.ID(snapshot), len(duplicateTracks), nil
-    }
+	if dryRun {
+		for _, t := range duplicateTracks {
+			log.Printf("[DUPLICATE] %s", TrackString(t.Track))
+		}
+		return playlistID, len(duplicateTracks), nil
+	} else {
+		ids := []spotify.ID{}
+		for _, t := range duplicateTracks {
+			ids = append(ids, t.Track.ID)
+		}
+		snapshot, err := spClient.RemoveTracksFromPlaylist(playlistID, ids...)
+		if err != nil {
+			return spotify.ID(snapshot), 0, err
+		}
+		// Return playlistID of new (mutated) playlist for next request.
+		return spotify.ID(snapshot), len(duplicateTracks), nil
+	}
 }
 
 func main() {
 
-    flag.BoolVar(&runserver, "runserver", false, "runs potentials-utils in server mode")
-    flag.BoolVar(&dryRun, "dry-run", false, "prints tracks that would be deleted from Potentials instead of removing them if true")
-    flag.BoolVar(&noCache, "no-cache", false, "If true, invalidates your library cache and rebuilds it from scratch")
-    flag.StringVar(&cfgPath, "config", "config.yaml", "Path to potentials-utils config file")
-    flag.Parse()
+	flag.BoolVar(&runserver, "runserver", false, "runs potentials-utils in server mode")
+	flag.BoolVar(&dryRun, "dry-run", false, "prints tracks that would be deleted from Potentials instead of removing them if true")
+	flag.BoolVar(&noCache, "no-cache", false, "If true, invalidates your library cache and rebuilds it from scratch")
+	flag.StringVar(&cfgPath, "config", "config.yaml", "Path to potentials-utils config file")
+	flag.Parse()
 
-    contents, err := ioutil.ReadFile(cfgPath)
-    if err != nil {
-        log.Fatalf("Config file at %s not found.", cfgPath)
-    }
-    err = yaml.Unmarshal(contents, &config)
-    if err != nil {
-        log.Fatalf("Failed to unmarshal YAML config, err: %v", err)
-    }
+	contents, err := ioutil.ReadFile(cfgPath)
+	if err != nil {
+		log.Fatalf("Config file at %s not found.", cfgPath)
+	}
+	err = yaml.Unmarshal(contents, &config)
+	if err != nil {
+		log.Fatalf("Failed to unmarshal YAML config, err: %v", err)
+	}
 	auth = spotify.NewAuthenticator(config.Spotify.CallbackURL, spotify.ScopeUserReadPrivate, spotify.ScopePlaylistReadPrivate, spotify.ScopePlaylistModifyPublic, spotify.ScopePlaylistModifyPrivate, spotify.ScopeUserLibraryRead)
-    // Stupid library reads by default from environment variables so we have to
-    // manually set credentials here.
-    auth.SetAuthInfo(config.Spotify.ID, config.Spotify.Secret)
-    rand.Seed(time.Now().UTC().UnixNano())
+	// Stupid library reads by default from environment variables so we have to
+	// manually set credentials here.
+	auth.SetAuthInfo(config.Spotify.ID, config.Spotify.Secret)
+	rand.Seed(time.Now().UTC().UnixNano())
 
-    if runserver {
-        log.Printf("Server UP")
-        authSrv := authServer()
-        log.Fatal(authSrv.ListenAndServe())
-    } else {
-        if dryRun {
-            log.Printf("Running cleanPotentials in dry-run mode. No tracks will be deleted from your playlist.")
-        }
-        cleaned, err := cleanPotentials(dryRun)
-        if err != nil {
-            log.Fatalf(err.Error())
-        }
-        if dryRun {
-            log.Printf("Found %d duplicate tracks in the potentials playlist.", cleaned)
-        } else {
-            log.Printf("Successfully cleaned %d tracks from the potentials playlist.", cleaned)
-        }
-    }
+	if runserver {
+		log.Printf("Server UP")
+		authSrv := authServer()
+		log.Fatal(authSrv.ListenAndServe())
+	} else {
+		if dryRun {
+			log.Printf("Running cleanPotentials in dry-run mode. No tracks will be deleted from your playlist.")
+		}
+		cleaned, err := cleanPotentials(dryRun)
+		if err != nil {
+			log.Fatalf(err.Error())
+		}
+		if dryRun {
+			log.Printf("Found %d duplicate tracks in the potentials playlist.", cleaned)
+		} else {
+			log.Printf("Successfully cleaned %d tracks from the potentials playlist.", cleaned)
+		}
+	}
 
 }
