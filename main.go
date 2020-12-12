@@ -74,7 +74,7 @@ type PotentialsUtilsConfig struct {
 	Cache      CacheConfig      `yaml:"cache"`
 }
 
-// LibraryService is responsible for interfacing with the potentials-utils
+// LibraryService is responsible for interfacing with the potentials-utils local
 // spotify library
 type LibraryService struct {
 	CacheDir     string
@@ -129,6 +129,39 @@ func (s *LibraryService) readyLibrary() error {
 
 }
 
+// GetByID returns the corresponding SavedTRack for the provided key if it exists and the cache is
+// fresh. Will rebuild the cache if stale.
+func (s *LibraryService) GetByID(k spotify.ID) (*spotify.SavedTrack, error) {
+	err := s.readyLibrary()
+	if err != nil {
+		return nil, err
+	}
+	v := s.libraryIndex.tracksByID[k]
+	return v, nil
+}
+
+// GetBySongArtistAlbum gets all tracks with the same song name, artist name, and album title
+func (s *SpotifyLibraryService) GetBySongAlbumArtistNames(songName, albumName string, artistNames []string) ([]*spotify.SavedTrack, error) {
+	err := s.readyLibrary()
+	if err != nil {
+		return nil, err
+	}
+	searchStr := trackIndexString(songName, albumName, artistNames)
+	if s.libraryIndex.trackSearchTree.Contains(searchStr) {
+		// search entire cache for songs that match these fields
+		var matches []*spotify.SavedTrack
+		for _, v := range c.tracksByID {
+			if v.Name == songName && v.Album.Name == albumName && containsAll(getArtistNames(v.SimpleTrack), artistNames) {
+				matches = append(matches, v)
+			}
+		}
+		return matches, nil
+	} else {
+		return nil, nil
+	}
+
+}
+
 // SpotifyLibraryIndex represents an in-memory cache of the current users' spotify library. It must
 // be completely rebuilt if the current time is after the evictionTime. Yeah I
 // know this is basically a hand-tuned database, I did it for fun go read a book
@@ -170,17 +203,17 @@ func NewSpotifyLibraryIndex() (*SpotifyLibraryIndex, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := &SpotifyLibraryIndex{
+	i := &SpotifyLibraryIndex{
 		tracksByID:      map[spotify.ID]*spotify.SavedTrack{},
 		trackSearchTree: prefixtree.NewPrefixTree(),
 		lifetime:        config.Cache.Lifetime,
 		evictionTime:    time.Now(), // Eviction time will be incremented by lifetime once cache is ready
 	}
-	err = c.readyCache()
+	err = i.Rebuild()
 	if err != nil {
 		return nil, err
 	}
-	return c, nil
+	return i, nil
 
 }
 
@@ -200,35 +233,14 @@ func trackIndexString(trackName, albumName string, artistNames []string) string 
 
 // addTrackToSearchTree adds tracks to the search tree using a custom track
 // string "[TrackName][AlbumName][ArtistNames...]"
-func (c *SpotifyLibraryIndex) addTrackToSearchTree(v spotify.SavedTrack) {
+func (i *SpotifyLibraryIndex) addTrackToSearchTree(v spotify.SavedTrack) {
 	searchTerm := trackIndexString(v.Name, v.Album.Name, getArtistNames(v.SimpleTrack))
-	c.trackSearchTree.Add(searchTerm)
+	i.trackSearchTree.Add(searchTerm)
 }
 
-// GetByID returns the corresponding SavedTRack for the provided key if it exists and the cache is
-// fresh. Will rebuild the cache if stale.
-func (c *SpotifyLibraryIndex) GetByID(k spotify.ID) (*spotify.SavedTrack, error) {
-	err := c.readyCache()
-	if err != nil {
-		return nil, err
-	}
-	v := c.tracksByID[k]
-	return v, nil
-}
-
-func (c *SpotifyLibraryIndex) indexTrack(k spotify.ID, v spotify.SavedTrack) {
-	c.tracksByID[k] = &v
-	c.addTrackToSearchTree(v)
-}
-
-// Put adds the provided key-value pair (ID -> SavedTrack) to the cache
-func (c *SpotifyLibraryIndex) Put(k spotify.ID, v spotify.SavedTrack) error {
-	err := c.readyCache()
-	if err != nil {
-		return err
-	}
-	c.indexTrack(k, v)
-	return nil
+func (i *SpotifyLibraryIndex) indexTrack(k spotify.ID, v spotify.SavedTrack) {
+	i.tracksByID[k] = &v
+	i.addTrackToSearchTree(v)
 }
 
 func containsAll(list1, list2 []string) bool {
@@ -248,37 +260,11 @@ func containsAll(list1, list2 []string) bool {
 
 }
 
-// GetBySongArtistAlbum gets all tracks with the same song name, artist name, and album title
-func (c *SpotifyLibraryIndex) GetBySongAlbumArtistNames(songName, albumName string, artistNames []string) ([]*spotify.SavedTrack, error) {
-	err := c.readyCache()
-	if err != nil {
-		return nil, err
-	}
-	searchStr := trackIndexString(songName, albumName, artistNames)
-	if c.trackSearchTree.Contains(searchStr) {
-		// search entire cache for songs that match these fields
-		var matches []*spotify.SavedTrack
-		for _, v := range c.tracksByID {
-			if v.Name == songName && v.Album.Name == albumName && containsAll(getArtistNames(v.SimpleTrack), artistNames) {
-				matches = append(matches, v)
-			}
-		}
-		return matches, nil
-	} else {
-		return nil, nil
-	}
-
+func (i *SpotifyLibraryIndex) Alive() bool {
+	return time.Now().Before(i.evictionTime)
 }
 
-func (c *SpotifyLibraryIndex) Alive() bool {
-	return time.Now().Before(c.evictionTime)
-}
-
-func (c *SpotifyLibraryIndex) readyCache() error {
-	if c.Alive() {
-		// Cache has not expired yet, cache ready
-		return nil
-	}
+func (i *SpotifyLibraryIndex) Rebuild() error {
 
 	// Cache has expired, need to rebuild
 	log.Printf("Rebuilding Spotify library cache index...")
@@ -501,7 +487,7 @@ func cleanPotentialsPage(page []spotify.PlaylistTrack, playlistID spotify.ID, dr
 		}
 		// if aggressive cleaning, try to match the track metadata to something in our library
 		if config.Duplicates.Aggressive {
-			duplicateLibraryTracks, err := libraryCache.GetBySongAlbumArtistNames(playlistTrack.Track.Name, playlistTrack.Track.Album.Name, getArtistNames(playlistTrack.Track.SimpleTrack))
+			duplicateLibraryTracks, err := libraryService.GetBySongAlbumArtistNames(playlistTrack.Track.Name, playlistTrack.Track.Album.Name, getArtistNames(playlistTrack.Track.SimpleTrack))
 			if err != nil {
 				return spotify.ID(""), 0, err
 			}
