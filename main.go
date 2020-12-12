@@ -26,16 +26,16 @@ import (
 )
 
 var (
-	clientCh     = make(chan *spotify.Client)
-	auth         spotify.Authenticator
-	spClient     *spotify.Client
-	libraryCache *SpotifyLibraryIndex
-	sessionKey   string
-	config       *PotentialsUtilsConfig
-	cfgPath      string
-	runserver    bool
-	dryRun       bool
-	noCache      bool
+	clientCh       = make(chan *spotify.Client)
+	auth           spotify.Authenticator
+	spClient       *spotify.Client
+	libraryService *SpotifyLibraryService
+	sessionKey     string
+	config         *PotentialsUtilsConfig
+	cfgPath        string
+	runserver      bool
+	dryRun         bool
+	noCache        bool
 )
 
 type SpotifyLibraryIndexCreateError struct{}
@@ -400,20 +400,6 @@ func HandleCleanPotentials(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Successfully cleaned %d tracks from the potentials playlist.", cleaned)
 }
 
-func refreshLibraryCache() error {
-	if libraryCache != nil {
-		// Quick cache freshness check, will rebuild the cache if it has expired
-		libraryCache.GetByID(spotify.ID(""))
-		return nil
-	}
-	c, err := NewSpotifyLibraryIndex()
-	if err != nil {
-		return err
-	}
-	libraryCache = c
-	return nil
-}
-
 func cleanPotentials(dryRun bool) (int, error) {
 	// First build a cache of my library
 	err := refreshLibraryCache()
@@ -475,7 +461,7 @@ func cleanPotentialsPage(page []spotify.PlaylistTrack, playlistID spotify.ID, dr
 	for _, playlistTrack := range page {
 		trackID := playlistTrack.Track.ID
 		// first try to get the track by ID
-		libraryTrack, err := libraryCache.GetByID(trackID)
+		libraryTrack, err := libraryService.GetByID(trackID)
 		if err != nil {
 			return spotify.ID(""), 0, err
 		}
@@ -539,6 +525,7 @@ func main() {
 	// manually set credentials here.
 	auth.SetAuthInfo(config.Spotify.ID, config.Spotify.Secret)
 	rand.Seed(time.Now().UTC().UnixNano())
+	libraryService = NewLibraryService(config.Cache.CacheDir)
 
 	if runserver {
 		log.Printf("Server UP")
