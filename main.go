@@ -7,12 +7,12 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"math/rand"
 	"net/http"
 	"os"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,6 +36,7 @@ var (
 	runserver      bool
 	dryRun         bool
 	noCache        bool
+	logLevel       = log.WarnLevel
 )
 
 var SpotifyLibraryIndexCreateError = errors.New("Error creating Spotify library cache")
@@ -140,18 +141,19 @@ func (s *LibraryService) persistLibrary() error {
 
 func (s *LibraryService) readyLibrary() error {
 	if s.libraryIndex.Alive() {
-		log.Printf("Library index is fresh.")
+		log.Debug("Library index is fresh.")
 		return nil
 	}
-	log.Printf("Library index is not fresh, attempting to build from local cache.")
+	log.Debug("Library index is not fresh, attempting to build from local cache.")
 	if err := s.indexFromCacheFile(); err != nil {
-		log.Printf("Failed to build index from cache, error: %v", err)
+		log.WithFields(log.Fields{"err": err}).Warn("failed to build index from cache")
 	}
 	if s.libraryIndex.Alive() {
-		log.Printf("Built a fresh library index from disk cache.")
+		log.Info("built a fresh library index from disk cache.")
 		return nil
 	} else {
-		log.Printf("Failed to build a fresh index from local disk cache at %s. Attempting to build cache from Spotify API...", s.cacheFile)
+		log.WithFields(log.Fields{"cacheFile": s.CacheFile}).Warn("failed to build a fresh index from local disk cache")
+		log.Info("Attempting to build cache from Spotify API...")
 		if err := s.indexFromSpotify(); err != nil {
 			return err
 		}
@@ -161,13 +163,13 @@ func (s *LibraryService) readyLibrary() error {
 
 func (s *LibraryService) indexFromSpotify() error {
 	index := NewSpotifyLibraryIndex()
-	log.Printf("Rebuilding Spotify library cache index...")
+	log.Info("Rebuilding Spotify library index...")
 	trackPager, err := spClient.CurrentUsersTracks()
 	if err != nil {
 		return err
 	}
+	progressBar := pb.StartNew(trackPager.Total)
 	for {
-		log.Printf("Built %d/%d tracks...", trackPager.Offset, trackPager.Total)
 		for _, t := range trackPager.Tracks {
 			index.IndexTrack(t.ID, t)
 		}
@@ -178,6 +180,7 @@ func (s *LibraryService) indexFromSpotify() error {
 			}
 			break
 		}
+		progressBar.Add(trackPager.Limit)
 	}
 	index.MakeItFresh()
 	s.libraryIndex = index
@@ -327,7 +330,7 @@ func authServer() *http.Server {
 	mux.HandleFunc("/callback/spotify", HandleAuthCallback)
 	mux.HandleFunc("/spotify/cleanpotentials", HandleCleanPotentials)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		log.Println("Got request for:", r.URL.String())
+		log.WithFields(log.Fields{"url": r.URL.String()}).Debug("unhandled request")
 	})
 	srv := &http.Server{
 		Addr:    ":8080",
@@ -342,7 +345,7 @@ func authServer() *http.Server {
 func AuthMe() error {
 	// no auth server up, start a one-off
 	if !runserver {
-		log.Printf("running one-off auth server")
+		log.Info("running one-off auth server...")
 		authSrv := authServer()
 		go func() {
 			err := authSrv.ListenAndServe()
@@ -372,7 +375,7 @@ func AuthMe() error {
 			return err
 		}
 		// The current client works, just use it.
-		log.Printf("The current Spotify client is authenticated.")
+		log.Info("The current Spotify client is authenticated.")
 	}
 	return nil
 }
@@ -390,7 +393,7 @@ func authMeWithTimeout() error {
 	select {
 	case c := <-clientCh:
 		spClient = c
-		log.Printf("Authenticated successfully with Spotify.")
+		fmt.Printf("Authenticated successfully with Spotify.")
 		return nil
 	case <-timeoutCh:
 		return fmt.Errorf("Authentication timed out.")
@@ -400,10 +403,10 @@ func authMeWithTimeout() error {
 
 // HandleAuthCallback handles the Spotify OAuth2.0 callback and passes on an auth'd client
 func HandleAuthCallback(w http.ResponseWriter, r *http.Request) {
-	// use the same state string here that you used to generate the URL
+	// must use the same session key here that you used to generate the URL
 	token, err := auth.Token(sessionKey, r)
 	if err != nil {
-		log.Printf("Received auth callback, failed.")
+		log.WithFields(log.Fields{"sessionKey": sessionKey, "err": err}).Error("received auth callback, failed to retrieve token.")
 		http.Error(w, fmt.Sprintf("Couldn't get token from sessionkey %s, request %v", sessionKey, r), http.StatusNotFound)
 		return
 	}
@@ -412,7 +415,7 @@ func HandleAuthCallback(w http.ResponseWriter, r *http.Request) {
 	clientCh <- &c
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("200 - OK"))
-	log.Printf("Created client, auth flow complete")
+	log.WithFields(log.Fields{"token": token}).Info("created client, auth flow complete")
 }
 
 // HandleCleanPotentials cleans my Potentials playlist. It removes all songs i have already saved in
@@ -420,13 +423,12 @@ func HandleAuthCallback(w http.ResponseWriter, r *http.Request) {
 func HandleCleanPotentials(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("200 - OK"))
-	log.Printf("%s - OK", r.URL.Path)
 	cleaned, err := cleanPotentials(false)
 	if err != nil {
-		log.Printf("Error cleaning Potentials playlist: %v", err)
+		log.WithFields(log.Fields{"err": err}).Error("error cleaning Potentials playlist")
 		return
 	}
-	log.Printf("Successfully cleaned %d tracks from the Potentials playlist.", cleaned)
+	log.WithFields(log.Fields{"numRemoved": cleaned}).Info("successfully cleaned duplicate tracks from the Potentials playlist")
 }
 
 // cleanPotentials removes duplicate tracks from the configured spotify
@@ -437,7 +439,7 @@ func cleanPotentials(dryRun bool) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	log.Printf("Cleaning Potentials (playlist ID: %s)...", playlist.ID)
+	log.WithFields(log.Fields{"playlistID": playlist.ID}).Info("cleaning Potentials playlist...")
 
 	// Clean the playlist page by page cross-referencing the library cache
 	pager := &playlist.Tracks
@@ -449,7 +451,7 @@ func cleanPotentials(dryRun bool) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		log.Printf("getDuplicates took %v", time.Since(begin))
+		log.WithFields(log.Fields{"duration": time.Since(begin)}).Debug("getDuplicates")
 		duplicates = append(duplicates, duplicatesInPage...)
 		if err = spClient.NextPage(pager); err != nil {
 			if err == spotify.ErrNoMorePages {
@@ -459,9 +461,10 @@ func cleanPotentials(dryRun bool) (int, error) {
 		}
 		progressBar.Add(pager.Limit)
 	}
+	progressBar.Finish()
 	ids := []spotify.ID{}
 	for _, t := range duplicates {
-		log.Printf("[DUPLICATE] %s", TrackString(t.Track))
+		fmt.Printf("[DUPLICATE] %s", TrackString(t.Track))
 		ids = append(ids, t.Track.ID)
 	}
 	if !dryRun {
@@ -472,7 +475,6 @@ func cleanPotentials(dryRun bool) (int, error) {
 			return 0, err
 		}
 	}
-	progressBar.Finish()
 	return len(duplicates), nil
 }
 
@@ -511,7 +513,6 @@ func getDuplicates(page []spotify.PlaylistTrack) ([]spotify.PlaylistTrack, error
 		}
 		if libraryTrack != nil {
 			// track is already in our library, remove it
-			// log.Printf("Found a duplicate track in the Potentials playlist: %s by %s off the album %s (ID: %s).", track.Track.Name, track.Track.Artists[0].Name, track.Track.Album.Name, trackID)
 			duplicateTracks = append(duplicateTracks, playlistTrack)
 			continue
 		}
@@ -532,21 +533,49 @@ func getDuplicates(page []spotify.PlaylistTrack) ([]spotify.PlaylistTrack, error
 	return duplicateTracks, nil
 }
 
+type LevelValue struct {
+	Verbosity string
+	Level     *log.Level
+}
+
+func (v LevelValue) String() string {
+	return v.Verbosity
+}
+
+func (v LevelValue) Set(l string) error {
+	if i, err := strconv.Atoi(l); err != nil {
+		return err
+	} else {
+		if i < 0 || i > 3 {
+			return log.ErrInvalidLevel
+		} else {
+			v.Verbosity = l
+			*v.Level = log.Level(3 - i)
+		}
+	}
+	return nil
+
+}
+
 func main() {
 
 	flag.BoolVar(&runserver, "runserver", false, "runs potentials-utils in server mode")
 	flag.BoolVar(&dryRun, "dry-run", false, "prints tracks that would be deleted from Potentials instead of removing them if true")
-	flag.BoolVar(&noCache, "no-cache", false, "If true, invalidates your library cache and rebuilds it from scratch")
-	flag.StringVar(&cfgPath, "config", "config.yaml", "Path to potentials-utils config file")
+	flag.BoolVar(&noCache, "no-cache", false, "if true, invalidates your local spotify library cache and rebuilds it from scratch")
+	flag.StringVar(&cfgPath, "config", "config.yaml", "path to potentials-utils config file")
+	flag.Var(&LevelValue{Level: &logLevel}, "verbosity", "sets application verbosity [0-3] (default 1)")
 	flag.Parse()
+
+	log.SetLevel(logLevel)
+	log.WithFields(log.Fields{"level": logLevel}).Info("Logging level")
 
 	contents, err := ioutil.ReadFile(cfgPath)
 	if err != nil {
-		log.Fatalf("Config file at %s not found.", cfgPath)
+		log.WithFields(log.Fields{"path": cfgPath}).Fatal("config file not found")
 	}
 	err = yaml.Unmarshal(contents, &config)
 	if err != nil {
-		log.Fatalf("Failed to unmarshal YAML config, err: %v", err)
+		log.WithFields(log.Fields{"err": err}).Fatal("failed to unmarshal YAML config")
 	}
 	auth = spotify.NewAuthenticator(config.Spotify.CallbackURL, spotify.ScopeUserReadPrivate, spotify.ScopePlaylistReadPrivate, spotify.ScopePlaylistModifyPublic, spotify.ScopePlaylistModifyPrivate, spotify.ScopeUserLibraryRead)
 	// Stupid library reads by default from environment variables so we have to
@@ -556,25 +585,22 @@ func main() {
 
 	libraryService, err = NewLibraryService(config.Cache.CacheDir)
 	if err != nil {
-		log.Fatalf("Failed to start the potentials-utils library service, error: %v", err)
+		log.WithFields(log.Fields{"err": err}).Fatal("failed to start the potentials-utils library service")
 	}
 	if runserver {
-		log.Printf("Server UP")
+		log.Info("Server UP")
 		authSrv := authServer()
-		log.Fatal(authSrv.ListenAndServe())
+		authSrv.ListenAndServe()
 	} else {
 		if dryRun {
-			log.Printf("Running cleanPotentials in dry-run mode. No tracks will be deleted from your playlist.")
+			fmt.Println("Running cleanPotentials in dry-run mode. No tracks will be deleted from your playlist.")
 		}
 		cleaned, err := cleanPotentials(dryRun)
 		if err != nil {
-			log.Fatalf(err.Error())
+			log.WithFields(log.Fields{"err": err}).Fatal(err.Error())
 		}
-		if dryRun {
-			log.Printf("Found %d duplicate tracks in the Potentials playlist.", cleaned)
-		} else {
-			log.Printf("Successfully cleaned %d tracks from the Potentials playlist.", cleaned)
-		}
+		log.WithFields(log.Fields{"numRemoved": cleaned}).Info("removed tracks from potentials playlist")
+		fmt.Println("Potentials playlist cleaned.")
 	}
 
 }
