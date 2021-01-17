@@ -20,6 +20,8 @@ import (
 
 	"potentials-utils/prefixtree"
 
+	"github.com/apex/log"
+	"github.com/cheggaaa/pb/v3"
 	"github.com/zmb3/spotify"
 )
 
@@ -138,11 +140,19 @@ func (s *LibraryService) persistLibrary() error {
 
 func (s *LibraryService) readyLibrary() error {
 	if s.libraryIndex.Alive() {
+		log.Printf("Library index is fresh.")
 		return nil
 	}
+	log.Printf("Library index is not fresh, attempting to build from local cache.")
 	if err := s.indexFromCacheFile(); err != nil {
 		log.Printf("Failed to build index from cache, error: %v", err)
-		if err = s.indexFromSpotify(); err != nil {
+	}
+	if s.libraryIndex.Alive() {
+		log.Printf("Built a fresh library index from disk cache.")
+		return nil
+	} else {
+		log.Printf("Failed to build a fresh index from local disk cache at %s. Attempting to build cache from Spotify API...", s.cacheFile)
+		if err := s.indexFromSpotify(); err != nil {
 			return err
 		}
 	}
@@ -434,10 +444,12 @@ func cleanPotentials(dryRun bool) (int, error) {
 	progressBar := pb.StartNew(pager.Total)
 	duplicates := []spotify.PlaylistTrack{}
 	for {
+		begin := time.Now()
 		duplicatesInPage, err := getDuplicates(pager.Tracks)
 		if err != nil {
 			return 0, err
 		}
+		log.Printf("getDuplicates took %v", time.Since(begin))
 		duplicates = append(duplicates, duplicatesInPage...)
 		if err = spClient.NextPage(pager); err != nil {
 			if err == spotify.ErrNoMorePages {
@@ -460,7 +472,7 @@ func cleanPotentials(dryRun bool) (int, error) {
 			return 0, err
 		}
 	}
-	pb.Finish()
+	progressBar.Finish()
 	return len(duplicates), nil
 }
 
