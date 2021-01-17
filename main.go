@@ -427,10 +427,11 @@ func cleanPotentials(dryRun bool) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	log.Printf("Cleaning Potentials playlist ID: %s", playlist.ID)
+	log.Printf("Cleaning Potentials (playlist ID: %s)...", playlist.ID)
 
 	// Clean the playlist page by page cross-referencing the library cache
 	pager := &playlist.Tracks
+	progressBar := pb.StartNew(pager.Total)
 	duplicates := []spotify.PlaylistTrack{}
 	for {
 		duplicatesInPage, err := getDuplicates(pager.Tracks)
@@ -444,6 +445,7 @@ func cleanPotentials(dryRun bool) (int, error) {
 			}
 			return 0, err
 		}
+		progressBar.Add(pager.Limit)
 	}
 	ids := []spotify.ID{}
 	for _, t := range duplicates {
@@ -458,6 +460,7 @@ func cleanPotentials(dryRun bool) (int, error) {
 			return 0, err
 		}
 	}
+	pb.Finish()
 	return len(duplicates), nil
 }
 
