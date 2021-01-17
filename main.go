@@ -1,6 +1,3 @@
-// Author: paulangton
-// Copyright 2020
-
 package main
 
 import (
@@ -400,7 +397,6 @@ func HandleAuthCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Couldn't get token from sessionkey %s, request %v", sessionKey, r), http.StatusNotFound)
 		return
 	}
-	log.Printf("Got token %v", token)
 	// create a client using the specified token
 	c := auth.NewClient(token)
 	clientCh <- &c
@@ -409,7 +405,7 @@ func HandleAuthCallback(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Created client, auth flow complete")
 }
 
-// HandleCleanPotentials cleans my potentials playlist. It removes all songs i have already saved in
+// HandleCleanPotentials cleans my Potentials playlist. It removes all songs i have already saved in
 // my library from the playlist.
 func HandleCleanPotentials(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
@@ -417,38 +413,52 @@ func HandleCleanPotentials(w http.ResponseWriter, r *http.Request) {
 	log.Printf("%s - OK", r.URL.Path)
 	cleaned, err := cleanPotentials(false)
 	if err != nil {
-		log.Printf("Error cleaning potentials playlist: %v", err)
+		log.Printf("Error cleaning Potentials playlist: %v", err)
 		return
 	}
-	log.Printf("Successfully cleaned %d tracks from the potentials playlist.", cleaned)
+	log.Printf("Successfully cleaned %d tracks from the Potentials playlist.", cleaned)
 }
 
+// cleanPotentials removes duplicate tracks from the configured spotify
+// potentials playlist
 func cleanPotentials(dryRun bool) (int, error) {
-	// Fetch the potentials playlist
+	// Fetch the Potentials playlist
 	playlist, err := spClient.GetPlaylist(config.Spotify.PotentialsPlaylistID)
 	if err != nil {
 		return 0, err
 	}
+	log.Printf("Cleaning Potentials playlist ID: %s", playlist.ID)
 
 	// Clean the playlist page by page cross-referencing the library cache
 	pager := &playlist.Tracks
-	numCleaned := 0
+	duplicates := []spotify.PlaylistTrack{}
 	for {
-		_, numCleanedForPage, err := cleanPotentialsPage(pager.Tracks, config.Spotify.PotentialsPlaylistID, dryRun)
+		duplicatesInPage, err := getDuplicates(pager.Tracks)
 		if err != nil {
 			return 0, err
 		}
-		numCleaned += numCleanedForPage
-		err = spClient.NextPage(pager)
-		if err != nil {
-			if err != spotify.ErrNoMorePages {
-				return 0, err
+		duplicates = append(duplicates, duplicatesInPage...)
+		if err = spClient.NextPage(pager); err != nil {
+			if err == spotify.ErrNoMorePages {
+				break
 			}
-			break
+			return 0, err
 		}
 	}
-	return numCleaned, nil
-
+	ids := []spotify.ID{}
+	for _, t := range duplicates {
+		log.Printf("[DUPLICATE] %s", TrackString(t.Track))
+		ids = append(ids, t.Track.ID)
+	}
+	if !dryRun {
+		// Assuming this is atomic... the first returned value is the new playlist
+		// snapshot for future requests, unused for now
+		_, err := spClient.RemoveTracksFromPlaylist(config.Spotify.PotentialsPlaylistID, ids...)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return len(duplicates), nil
 }
 
 // TrackString prints a human-readable summary of a spotify track
@@ -472,19 +482,21 @@ func getArtistNames(t spotify.SimpleTrack) []string {
 	return names
 }
 
-// cleanPotentialsPage also returns the number of duplicate tracks cleaned on the given page
-func cleanPotentialsPage(page []spotify.PlaylistTrack, playlistID spotify.ID, dryRun bool) (spotify.ID, int, error) {
+// getDuplicates finds all tracks in the provided list of playlist tracks which
+// are duplicated in your library. Duplication detection is by ID by default,
+// but can be done by title-artist-album by specifying `--aggressive`.
+func getDuplicates(page []spotify.PlaylistTrack) ([]spotify.PlaylistTrack, error) {
 	duplicateTracks := []spotify.PlaylistTrack{}
 	for _, playlistTrack := range page {
 		trackID := playlistTrack.Track.ID
 		// first try to get the track by ID
 		libraryTrack, err := libraryService.GetByID(trackID)
 		if err != nil {
-			return spotify.ID(""), 0, err
+			return []spotify.PlaylistTrack{}, err
 		}
 		if libraryTrack != nil {
 			// track is already in our library, remove it
-			// log.Printf("Found a duplicate track in the potentials playlist: %s by %s off the album %s (ID: %s).", track.Track.Name, track.Track.Artists[0].Name, track.Track.Album.Name, trackID)
+			// log.Printf("Found a duplicate track in the Potentials playlist: %s by %s off the album %s (ID: %s).", track.Track.Name, track.Track.Artists[0].Name, track.Track.Album.Name, trackID)
 			duplicateTracks = append(duplicateTracks, playlistTrack)
 			continue
 		}
@@ -492,7 +504,7 @@ func cleanPotentialsPage(page []spotify.PlaylistTrack, playlistID spotify.ID, dr
 		if config.Duplicates.Aggressive {
 			duplicateLibraryTracks, err := libraryService.GetBySongAlbumArtistNames(playlistTrack.Track.Name, playlistTrack.Track.Album.Name, getArtistNames(playlistTrack.Track.SimpleTrack))
 			if err != nil {
-				return spotify.ID(""), 0, err
+				return []spotify.PlaylistTrack{}, err
 			}
 			// Means we found at least one library track which is a
 			// name-album-artist duplicate
@@ -502,23 +514,7 @@ func cleanPotentialsPage(page []spotify.PlaylistTrack, playlistID spotify.ID, dr
 		}
 	}
 
-	if dryRun {
-		for _, t := range duplicateTracks {
-			log.Printf("[DUPLICATE] %s", TrackString(t.Track))
-		}
-		return playlistID, len(duplicateTracks), nil
-	} else {
-		ids := []spotify.ID{}
-		for _, t := range duplicateTracks {
-			ids = append(ids, t.Track.ID)
-		}
-		snapshot, err := spClient.RemoveTracksFromPlaylist(playlistID, ids...)
-		if err != nil {
-			return spotify.ID(snapshot), 0, err
-		}
-		// Return playlistID of new (mutated) playlist for next request.
-		return spotify.ID(snapshot), len(duplicateTracks), nil
-	}
+	return duplicateTracks, nil
 }
 
 func main() {
@@ -560,9 +556,9 @@ func main() {
 			log.Fatalf(err.Error())
 		}
 		if dryRun {
-			log.Printf("Found %d duplicate tracks in the potentials playlist.", cleaned)
+			log.Printf("Found %d duplicate tracks in the Potentials playlist.", cleaned)
 		} else {
-			log.Printf("Successfully cleaned %d tracks from the potentials playlist.", cleaned)
+			log.Printf("Successfully cleaned %d tracks from the Potentials playlist.", cleaned)
 		}
 	}
 
