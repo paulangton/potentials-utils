@@ -393,7 +393,7 @@ func authMeWithTimeout() error {
 	select {
 	case c := <-clientCh:
 		spClient = c
-		fmt.Printf("Authenticated successfully with Spotify.")
+		fmt.Println("Authenticated successfully with Spotify.")
 		return nil
 	case <-timeoutCh:
 		return fmt.Errorf("Authentication timed out.")
@@ -440,6 +440,7 @@ func cleanPotentials(dryRun bool) (int, error) {
 		return 0, err
 	}
 	log.WithFields(log.Fields{"playlistID": playlist.ID}).Info("cleaning Potentials playlist...")
+	fmt.Printf("Cleaning your Potentials playlist: %s...\n", playlist.Name)
 
 	// Clean the playlist page by page cross-referencing the library cache
 	pager := &playlist.Tracks
@@ -464,18 +465,39 @@ func cleanPotentials(dryRun bool) (int, error) {
 	progressBar.Finish()
 	ids := []spotify.ID{}
 	for _, t := range duplicates {
-		fmt.Printf("[DUPLICATE] %s", TrackString(t.Track))
+		fmt.Printf("[DUPLICATE] %s\n", TrackString(t.Track))
 		ids = append(ids, t.Track.ID)
 	}
 	if !dryRun {
 		// Assuming this is atomic... the first returned value is the new playlist
-		// snapshot for future requests, unused for now
-		_, err := spClient.RemoveTracksFromPlaylist(config.Spotify.PotentialsPlaylistID, ids...)
-		if err != nil {
-			return 0, err
+		// snapshot for future requests, unused for now. When I use the snapshot
+		// in the next Request I get an error from spotify: "Invalid playlist Id"
+		playlistID := config.Spotify.PotentialsPlaylistID
+		for {
+			// Can only remove 100 tracks per request.
+			toRemove, rest := FirstNIDs(ids, 100)
+			//if snapshot, err := spClient.RemoveTracksFromPlaylist(playlistID, toRemove...); err != nil {
+			if _, err := spClient.RemoveTracksFromPlaylist(playlistID, toRemove...); err != nil {
+				return 0, err
+			} else if len(rest) > 0 {
+				//playlistID = spotify.ID(snapshot)
+			} else { // Nothing else to remove
+				break
+			}
 		}
+
 	}
 	return len(duplicates), nil
+}
+
+// Need to implement this because Go doesn't have generics. Returns the first n
+// IDs in the list and the rest of the list
+func FirstNIDs(ids []spotify.ID, n int) ([]spotify.ID, []spotify.ID) {
+	if len(ids) > n {
+		return ids[:n], ids[n:]
+	} else {
+		return ids, []spotify.ID{}
+	}
 }
 
 // TrackString prints a human-readable summary of a spotify track
@@ -488,7 +510,7 @@ func TrackString(t spotify.FullTrack) string {
 			artistString += fmt.Sprintf("%s, ", a.Name)
 		}
 	}
-	return fmt.Sprintf("%s, %s, on %s released %s, Track ID: %s\n", t.Name, artistString, t.Album.Name, t.Album.ReleaseDate, t.ID)
+	return fmt.Sprintf("%s, %s, on %s released %s, Track ID: %s", t.Name, artistString, t.Album.Name, t.Album.ReleaseDate, t.ID)
 }
 
 func getArtistNames(t spotify.SimpleTrack) []string {
@@ -567,7 +589,7 @@ func main() {
 	flag.Parse()
 
 	log.SetLevel(logLevel)
-	log.WithFields(log.Fields{"level": logLevel}).Info("Logging level")
+	log.WithFields(log.Fields{"level": logLevel}).Info("logging level")
 
 	contents, err := ioutil.ReadFile(cfgPath)
 	if err != nil {
